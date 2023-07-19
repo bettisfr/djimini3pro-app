@@ -1,0 +1,258 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    tools:context=".MainActivity">
+
+
+    <GridLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:columnCount="3">
+
+        <TextView
+            android:id="@+id/textView"
+            android:layout_columnSpan="1"
+            android:text="Simulator" />
+
+        <Button
+            android:id="@+id/button_start_simulator"
+            android:layout_column="1"
+            android:layout_columnWeight="1"
+            android:text="Start" />
+
+        <Button
+            android:id="@+id/button_stop_simulator"
+            android:layout_column="2"
+            android:layout_columnWeight="1"
+            android:text="Stop" />
+
+
+
+        <TextView
+            android:id="@+id/textView3"
+            android:layout_columnSpan="1"
+            android:text="Virtual Sticks" />
+
+        <Button
+            android:id="@+id/button_enable_virtual_sticks"
+            android:layout_column="1"
+            android:layout_columnWeight="1"
+            android:text="Enable" />
+
+        <Button
+            android:id="@+id/button_disable_virtual_sticks"
+            android:layout_column="2"
+            android:layout_columnWeight="1"
+            android:text="Disable" />
+
+
+
+        <TextView
+            android:id="@+id/textView4"
+            android:layout_columnSpan="1"
+            android:text="Mission" />
+
+        <Button
+            android:id="@+id/button_start_mission"
+            android:layout_column="1"
+            android:layout_columnWeight="1"
+            android:text="Start" />
+
+        <Button
+            android:id="@+id/button_stop_mission"
+            android:layout_column="2"
+            android:layout_columnWeight="1"
+            android:text="Stop" />
+
+    </GridLayout>
+
+
+
+
+    <GridLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:columnCount="2">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="State"
+            android:textStyle="bold"
+            android:layout_columnSpan="2"/>
+
+
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Is Drone Connected"/>
+
+        <TextView
+            android:id="@+id/textview_is_drone_connected"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="-" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Battery"
+            android:layout_column="0"/>
+
+        <TextView
+            android:id="@+id/textview_battery"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="-"
+            android:layout_column="1"/>
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Simulator On"
+            android:layout_column="0"/>
+
+        <TextView
+            android:id="@+id/textview_is_simulator_on"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="-"
+            android:layout_column="1"/>
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Virtual Sticks On"
+            android:layout_column="0"/>
+
+        <TextView
+            android:id="@+id/textview_is_virtual_sticks_on"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="-"
+            android:layout_column="1"/>
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Are Motors On"
+            android:layout_column="0"/>
+
+        <TextView
+            android:id="@+id/textview_are_motors_on"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="-"
+            android:layout_column="1"/>
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Is Flying"
+            android:layout_column="0"/>
+
+        <TextView
+            android:id="@+id/textview_is_flying"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="-"
+            android:layout_column="1"/>
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Pitch"
+            android:layout_column="0"/>
+
+        <TextView
+            android:id="@+id/textview_pitch"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="-"
+            android:layout_column="1"/>
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Roll"
+            android:layout_column="0"/>
+
+        <TextView
+            android:id="@+id/textview_roll"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="-"
+            android:layout_column="1"/>
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Yaw"
+            android:layout_column="0"/>
+
+        <TextView
+            android:id="@+id/textview_yaw"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="-"
+            android:layout_column="1"/>
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Position X,Y,Z"
+            android:layout_column="0"/>
+
+        <TextView
+            android:id="@+id/textview_position_x_y_z"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="-"
+            android:layout_column="1"/>
+
+<!--        <TextView-->
+<!--            android:layout_width="wrap_content"-->
+<!--            android:layout_height="wrap_content"-->
+<!--            android:text="Location"-->
+<!--            android:layout_column="0"/>-->
+
+<!--        <TextView-->
+<!--            android:id="@+id/textview_location"-->
+<!--            android:layout_width="wrap_content"-->
+<!--            android:layout_height="wrap_content"-->
+<!--            android:text="-"-->
+<!--            android:layout_column="1"/>-->
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Speed 3D"
+            android:layout_column="0"/>
+
+        <TextView
+            android:id="@+id/textview_speed"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="-"
+            android:layout_column="1"/>
+
+    </GridLayout>
+
+    <fragment
+        android:id="@+id/map_view"
+        class="com.google.android.gms.maps.SupportMapFragment"
+        android:layout_width="match_parent"
+        android:layout_height="275dp"
+        tools:layout="@layout/map_preview_layout" />
+
+<!--    <com.google.android.gms.maps.MapView-->
+<!--        android:id="@+id/map_view"-->
+<!--        android:layout_width="match_parent"-->
+<!--        android:layout_height="275dp" />-->
+
+
+</LinearLayout>
