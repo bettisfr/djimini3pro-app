@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Match DJI RC USB accessory reported by Android dumpsys usb -->
+    <usb-accessory manufacturer="DJI" model="com.dji.logiclink" />
+    <!-- Compatibility fallback for other DJI accessories -->
+    <usb-accessory manufacturer="DJI" model="DJI" />
+</resources>

@@ -1,3 +1,48 @@
 <resources>
-    <string name="your_app_name">My Application</string>
+    <string name="your_app_name">Mini3Pro</string>
+
+    <string name="home_point_updated">Home point updated! Latitude=%.4f, Longitude=%.4f</string>
+    <string name="home_point_unknown">Home point unknown</string>
+    <string name="starting_wp_action">Doing Waypoint=%1$d Action=%2$d: %3$s</string>
+    <string name="battery_percentage_format">%1$d%%</string>
+    <string name="error_output">error</string>
+    <string name="true_output">true</string>
+    <string name="false_output">false</string>
+    <string name="toggle_left_view_map">Map</string>
+    <string name="toggle_left_view_camera">Camera</string>
+
+    <string name="kmz_upload_success">Upload progress: 100%</string>
+
+    <string name="empty_label">--</string>
+    <string name="connection_label">Conn:</string>
+    <string name="simulator_label">Sim:</string>
+    <string name="battery_label">Bat:</string>
+    <string name="drone_altitude_label">Alt:</string>
+    <string name="drone_speed_label">Speed:</string>
+    <string name="drone_yaw_label">Yaw:</string>
+    <string name="gimbal_label">Gimb:</string>
+    <string name="log_label">Log:</string>
+    <string name="rtk_label">VS:</string>
+    <string name="home_label">Home:</string>
+
+    <string name="load_mission_button">Load</string>
+    <string name="start_mission_button">Start</string>
+    <string name="stop_mission_button">Stop</string>
+    <string name="pause_mission_button">Pause</string>
+    <string name="resume_mission_button">Resume</string>
+
+    <string name="simulator_switch">Simulator</string>
+    <string name="rtk_switch">VS</string>
+    <string name="pull_button">Pull</string>
+
+    <string name="map_button">Map</string>
+    <string name="camera_button">Camera</string>
+
+    <string name="slide_left">«</string>
+    <string name="slide_right">»</string>
+
+    <string name="vs_enabled">VS enabled</string>
+    <string name="vs_disabled">VS disabled</string>
+    <string name="vs_enable_failed">VS enable failed: %1$s</string>
+    <string name="vs_disable_failed">VS disable failed: %1$s</string>
 </resources>

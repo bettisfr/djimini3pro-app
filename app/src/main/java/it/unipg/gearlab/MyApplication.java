@@ -1,14 +1,12 @@
-package com.dji.myapplication;
+package it.unipg.gearlab;
 
 import android.app.Application;
 import android.content.Context;
-
-import com.secneo.sdk.Helper;
 
 public class MyApplication extends Application {
     @Override
     protected void attachBaseContext(Context base) {
         super.attachBaseContext(base);
-        Helper.install(this);
+        com.cySdkyc.clx.Helper.install(this);
     }
 }

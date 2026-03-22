@@ -1,0 +1,176 @@
+<LinearLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:layout_gravity="top|center_horizontal"
+    android:orientation="horizontal"
+    android:padding="8dp"
+    android:background="#80000000"> <!-- 50% transparent gray -->
+
+    <!-- Connected Status -->
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="@string/connection_label"
+        android:textColor="#FFFFFF"
+        android:layout_gravity="start"
+        android:padding="2dp" />
+
+    <TextView
+        android:id="@+id/textview_is_drone_connected"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:text="@string/empty_label"
+        android:textColor="#FFFFFF"
+        android:layout_gravity="end"
+        android:padding="2dp"
+        android:layout_weight="1" /> <!-- Added layout_weight to keep position fixed -->
+
+    <!-- Simulator Status -->
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="@string/simulator_label"
+        android:textColor="#FFFFFF"
+        android:layout_gravity="start"
+        android:padding="2dp" />
+
+    <TextView
+        android:id="@+id/textview_is_simulator_on"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:text="@string/empty_label"
+        android:textColor="#FFFFFF"
+        android:layout_gravity="end"
+        android:padding="2dp"
+        android:layout_weight="1" /> <!-- Added layout_weight -->
+
+    <!-- Battery Status -->
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="@string/battery_label"
+        android:textColor="#FFFFFF"
+        android:layout_gravity="start"
+        android:padding="2dp" />
+
+    <TextView
+        android:id="@+id/textview_battery"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:text="@string/empty_label"
+        android:textColor="#FFFFFF"
+        android:layout_gravity="end"
+        android:padding="2dp"
+        android:layout_weight="1" /> <!-- Added layout_weight -->
+
+    <!-- Drone Yaw -->
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="@string/drone_yaw_label"
+        android:textColor="#FFFFFF"
+        android:layout_gravity="start"
+        android:padding="2dp" />
+
+    <TextView
+        android:id="@+id/textview_drone_yaw"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:text="@string/empty_label"
+        android:textColor="#FFFFFF"
+        android:layout_gravity="end"
+        android:padding="2dp"
+        android:layout_weight="1" /> <!-- Added layout_weight -->
+
+    <!-- Drone Altitude -->
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="@string/drone_altitude_label"
+        android:textColor="#FFFFFF"
+        android:layout_gravity="start"
+        android:padding="2dp" />
+
+    <TextView
+        android:id="@+id/textview_drone_altitude"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:text="@string/empty_label"
+        android:textColor="#FFFFFF"
+        android:layout_gravity="end"
+        android:padding="2dp"
+        android:layout_weight="1" /> <!-- Added layout_weight -->
+
+    <!-- Drone Speed -->
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="@string/drone_speed_label"
+        android:textColor="#FFFFFF"
+        android:layout_gravity="start"
+        android:padding="2dp" />
+
+    <TextView
+        android:id="@+id/textview_drone_speed"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:text="@string/empty_label"
+        android:textColor="#FFFFFF"
+        android:layout_gravity="end"
+        android:padding="2dp"
+        android:layout_weight="1" /> <!-- Added layout_weight -->
+
+<!--    &lt;!&ndash; Gimbal Pitch/Yaw &ndash;&gt;-->
+<!--    <TextView-->
+<!--        android:layout_width="wrap_content"-->
+<!--        android:layout_height="wrap_content"-->
+<!--        android:text="@string/gimbal_label"-->
+<!--        android:textColor="#FFFFFF"-->
+<!--        android:layout_gravity="start"-->
+<!--        android:padding="2dp" />-->
+
+<!--    <TextView-->
+<!--        android:id="@+id/textview_gimbal_pitch_yaw"-->
+<!--        android:layout_width="0dp"-->
+<!--        android:layout_height="wrap_content"-->
+<!--        android:text="@string/empty_label"-->
+<!--        android:textColor="#FFFFFF"-->
+<!--        android:layout_gravity="end"-->
+<!--        android:padding="2dp"-->
+<!--        android:layout_weight="1" /> &lt;!&ndash; Added layout_weight &ndash;&gt;-->
+
+    <!-- RTK Status -->
+    <!--        <TextView-->
+    <!--            android:layout_width="wrap_content"-->
+    <!--            android:layout_height="wrap_content"-->
+    <!--            android:text="@string/rtk_label"-->
+    <!--            android:textColor="#FFFFFF"-->
+    <!--            android:padding="2dp" />-->
+
+    <!--        <TextView-->
+    <!--            android:id="@+id/textview_rtk"-->
+    <!--            android:layout_width="0dp"-->
+    <!--            android:layout_height="wrap_content"-->
+    <!--            android:text="@string/empty_label"-->
+    <!--            android:textColor="#FFFFFF"-->
+    <!--            android:padding="2dp"-->
+    <!--            android:layout_weight="1" />-->
+
+    <!-- Home Status -->
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="@string/home_label"
+        android:textColor="#FFFFFF"
+        android:padding="2dp" />
+
+    <TextView
+        android:id="@+id/textview_home"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:text="@string/empty_label"
+        android:textColor="#FFFFFF"
+        android:padding="2dp"
+        android:layout_weight="1" />
+</LinearLayout>

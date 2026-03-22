@@ -1,27 +1,8 @@
-apply from:rootProject.file('dependencies.gradle')
-
-buildscript {
-    ext.kotlin_version = '1.6.10'
-    repositories {
-        google()
-        jcenter()
-        mavenCentral()
-    }
-    dependencies {
-        classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlin_version"
-        classpath "com.android.tools.build:gradle:4.2.2"
-    }
-}
-
-allprojects {
-    repositories {
-        google()
-        jcenter()
-        mavenCentral()
-    }
+plugins {
+    alias(libs.plugins.android.application) apply false
+    alias(libs.plugins.kotlin.android) apply false
 }
 
 task clean(type: Delete) {
     delete rootProject.buildDir
 }
-

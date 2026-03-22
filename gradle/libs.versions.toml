@@ -1,0 +1,27 @@
+[versions]
+agp = "8.8.0"
+kotlin = "1.9.24"
+androidSdk = "11.8.0"
+coreKtx = "1.10.1"
+appcompat = "1.7.0"
+material = "1.12.0"
+constraintlayout = "2.2.0"
+playServicesMaps = "19.0.0"
+djiSdkV5Aircraft = "5.12.0"
+slidingpanelayout = "1.2.0"
+
+[libraries]
+android-sdk = { module = "org.maplibre.gl:android-sdk", version.ref = "androidSdk" }
+androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
+androidx-appcompat = { group = "androidx.appcompat", name = "appcompat", version.ref = "appcompat" }
+material = { group = "com.google.android.material", name = "material", version.ref = "material" }
+androidx-constraintlayout = { group = "androidx.constraintlayout", name = "constraintlayout", version.ref = "constraintlayout" }
+play-services-maps = { module = "com.google.android.gms:play-services-maps", version.ref = "playServicesMaps" }
+androidx-slidingpanelayout = { group = "androidx.slidingpanelayout", name = "slidingpanelayout", version.ref = "slidingpanelayout" }
+dji-sdk-v5-aircraft = { module = "com.dji:dji-sdk-v5-aircraft", version.ref = "djiSdkV5Aircraft" }
+dji-sdk-v5-aircraft-provided = { module = "com.dji:dji-sdk-v5-aircraft-provided", version.ref = "djiSdkV5Aircraft" }
+dji-sdk-v5-networkimp = { module = "com.dji:dji-sdk-v5-networkImp", version.ref = "djiSdkV5Aircraft" }
+
+[plugins]
+android-application = { id = "com.android.application", version.ref = "agp" }
+kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }

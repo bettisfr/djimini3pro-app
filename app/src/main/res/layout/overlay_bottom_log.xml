@@ -1,0 +1,27 @@
+<LinearLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:layout_gravity="bottom|center_horizontal"
+    android:orientation="horizontal"
+    android:padding="8dp"
+    android:background="#80000000"> <!-- 50% transparent gray -->
+
+    <!-- Log Label -->
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="@string/log_label"
+        android:textColor="#FFFFFF"
+        android:padding="2dp" />
+
+    <!-- Log Value -->
+    <TextView
+        android:id="@+id/textview_log"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="@string/empty_label"
+        android:textColor="#FFFFFF"
+        android:padding="2dp"
+        android:layout_weight="1" />
+</LinearLayout>
