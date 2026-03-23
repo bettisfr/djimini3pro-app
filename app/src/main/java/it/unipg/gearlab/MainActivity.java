@@ -1,13 +1,10 @@
 package it.unipg.gearlab;
 
-import static it.unipg.gearlab.Util.copyFileToTempFolder;
+import static it.unipg.gearlab.MissionFileRepository.copyFileToTempFolder;
 import static org.maplibre.android.style.layers.PropertyFactory.iconAllowOverlap;
 import static org.maplibre.android.style.layers.PropertyFactory.iconIgnorePlacement;
 import static org.maplibre.android.style.layers.PropertyFactory.iconImage;
 import static org.maplibre.android.style.layers.PropertyFactory.iconRotate;
-import static org.maplibre.android.style.layers.PropertyFactory.lineColor;
-import static org.maplibre.android.style.layers.PropertyFactory.lineDasharray;
-import static org.maplibre.android.style.layers.PropertyFactory.lineWidth;
 
 import android.animation.ObjectAnimator;
 import android.content.Intent;
@@ -15,7 +12,6 @@ import android.content.pm.ActivityInfo;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Color;
-import android.location.Location;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
@@ -32,8 +28,6 @@ import androidx.annotation.Nullable;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.documentfile.provider.DocumentFile;
 
-import com.dji.wpmzsdk.common.data.KMZInfo;
-import com.dji.wpmzsdk.manager.WPMZManager;
 import com.google.android.material.switchmaterial.SwitchMaterial;
 
 import org.maplibre.android.MapLibre;
@@ -42,12 +36,8 @@ import org.maplibre.android.geometry.LatLng;
 import org.maplibre.android.maps.MapLibreMap;
 import org.maplibre.android.maps.MapView;
 import org.maplibre.android.maps.Style;
-import org.maplibre.android.style.layers.LineLayer;
 import org.maplibre.android.style.layers.SymbolLayer;
 import org.maplibre.android.style.sources.GeoJsonSource;
-import org.maplibre.geojson.Feature;
-import org.maplibre.geojson.FeatureCollection;
-import org.maplibre.geojson.LineString;
 import org.maplibre.geojson.Point;
 
 import java.io.BufferedOutputStream;
@@ -63,7 +53,6 @@ import java.util.Locale;
 
 import dji.sdk.keyvalue.key.CameraKey;
 import dji.sdk.keyvalue.key.FlightControllerKey;
-import dji.sdk.keyvalue.key.GimbalKey;
 import dji.sdk.keyvalue.key.KeyTools;
 import dji.sdk.keyvalue.value.camera.CameraVideoStreamSourceType;
 import dji.sdk.keyvalue.value.common.ComponentIndexType;
@@ -80,7 +69,6 @@ import dji.sdk.keyvalue.value.gimbal.GimbalAngleRotation;
 import dji.sdk.keyvalue.value.gimbal.GimbalAngleRotationMode;
 import dji.sdk.keyvalue.value.gimbal.GimbalAttitudeRange;
 import dji.sdk.wpmz.value.mission.ActionGimbalRotateParam;
-import dji.sdk.wpmz.value.mission.Wayline;
 import dji.sdk.wpmz.value.mission.WaylineActionGroup;
 import dji.sdk.wpmz.value.mission.WaylineActionInfo;
 import dji.sdk.wpmz.value.mission.WaylineExecuteWaypoint;
@@ -143,13 +131,11 @@ public class MainActivity extends AppCompatActivity {
     private final List<WaylineExecuteWaypoint> missionWaypoints = new ArrayList<>();
     private final List<WaylineActionGroup> missionActionGroups = new ArrayList<>();
     private MissionPlanner missionPlanner;
+    private DroneCommander droneCommander;
+    private DroneStateRepository droneStateRepository;
+    private MissionMapRenderer missionMapRenderer;
     private final Handler vsMissionHandler = new Handler(Looper.getMainLooper());
     private boolean isMissionLoaded = false;
-    private boolean hasGimbalYawCapabilityInfo = false;
-    private boolean gimbalYawAdjustSupported = false;
-    @Nullable
-    private GimbalAttitudeRange gimbalAttitudeRange = null;
-    private Wayline loadedWayline;
     private final Runnable virtualStickMissionLoop = new Runnable() {
         @Override
         public void run() {
@@ -185,15 +171,21 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void initMissionPlanner() {
+        droneCommander = new DroneCommander();
+        droneStateRepository = new DroneStateRepository();
         missionPlanner = new MissionPlanner(new MissionPlanner.Callbacks() {
             @Override
             public void sendVirtualStickCommand(double pitch, double roll, double yawAngleDeg, double verticalVelocity) {
-                MainActivity.this.sendVirtualStickCommand(pitch, roll, yawAngleDeg, verticalVelocity);
+                if (droneCommander != null) {
+                    droneCommander.sendVirtualStickCommand(pitch, roll, yawAngleDeg, verticalVelocity, droneHeading);
+                }
             }
 
             @Override
             public void executeGimbalRotate(@Nullable ActionGimbalRotateParam param) {
-                MainActivity.this.executeGimbalRotate(param);
+                if (droneCommander != null) {
+                    droneCommander.executeGimbalRotate(param);
+                }
             }
 
             @Override
@@ -216,6 +208,7 @@ public class MainActivity extends AppCompatActivity {
                 });
             }
         });
+        missionMapRenderer = new MissionMapRenderer(getResources());
     }
 
     private void setAppStyle() {
@@ -527,45 +520,24 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void processMissionFile(@NonNull File missionFile) {
-        currentMissionPath = missionFile.getAbsolutePath();
-
-        KMZInfo kmzInfo = WPMZManager.getInstance().getKMZInfo(currentMissionPath);
-        if (kmzInfo == null) {
-            tvLog.setText("Invalid KMZ file");
+        KmzMissionParser.Result parseResult = KmzMissionParser.parse(missionFile);
+        if (!parseResult.isSuccess() || parseResult.mission == null) {
+            tvLog.setText(parseResult.error != null ? parseResult.error : "KMZ parse error");
             return;
         }
+        KmzMissionParser.ParsedMission parsedMission = parseResult.mission;
+        currentMissionPath = parsedMission.missionPath;
 
-        try {
-            List<Wayline> waylines = kmzInfo.getWaylineWaylinesParseInfo().getWaylines();
-            if (waylines == null || waylines.isEmpty()) {
-                tvLog.setText("KMZ has no waylines");
-                return;
-            }
-            loadedWayline = waylines.get(0);
-            missionWaypoints.clear();
-            missionActionGroups.clear();
+        missionWaypoints.clear();
+        missionActionGroups.clear();
+        missionWaypoints.addAll(parsedMission.waypoints);
+        missionActionGroups.addAll(parsedMission.actionGroups);
 
-            if (loadedWayline.getWaypoints() != null) {
-                missionWaypoints.addAll(loadedWayline.getWaypoints());
-            }
-            if (loadedWayline.getActionGroups() != null) {
-                missionActionGroups.addAll(loadedWayline.getActionGroups());
-            }
-            if (missionPlanner != null) {
-                missionPlanner.setMissionData(missionWaypoints, missionActionGroups);
-            }
-        } catch (Exception e) {
-            Log.e(TAG, "Failed to parse KMZ waylines", e);
-            tvLog.setText("KMZ parse error");
-            return;
+        if (missionPlanner != null) {
+            missionPlanner.setMissionData(missionWaypoints, missionActionGroups);
         }
 
-        if (missionWaypoints.isEmpty()) {
-            tvLog.setText("KMZ has no waypoints");
-            return;
-        }
-
-        setMissionOnMap(kmzInfo);
+        setMissionOnMap();
         logParsedWaypointsAndActions();
 
         isMissionLoaded = true;
@@ -885,121 +857,9 @@ public class MainActivity extends AppCompatActivity {
 
     private void stopMissionLoopAndHoldPosition() {
         vsMissionHandler.removeCallbacks(virtualStickMissionLoop);
-        sendVirtualStickCommand(0.0, 0.0, droneHeading, 0.0);
-    }
-
-    private void executeGimbalRotate(@Nullable ActionGimbalRotateParam param) {
-        if (param == null) {
-            return;
+        if (droneCommander != null) {
+            droneCommander.holdPosition(droneHeading);
         }
-        boolean enablePitch = Boolean.TRUE.equals(param.getEnablePitch());
-        boolean enableRoll = Boolean.TRUE.equals(param.getEnableRoll());
-        boolean enableYaw = Boolean.TRUE.equals(param.getEnableYaw());
-        double pitch = param.getPitch() != null ? param.getPitch() : 0.0;
-        double roll = param.getRoll() != null ? param.getRoll() : 0.0;
-        double yaw = param.getYaw() != null ? param.getYaw() : 0.0;
-
-        if (enableYaw && hasGimbalYawCapabilityInfo && !gimbalYawAdjustSupported) {
-            Log.w(TAG, "Skipping gimbal yaw action: yaw adjust not supported on this product.");
-            enableYaw = false;
-        }
-
-        DoubleMinMax pitchRange = gimbalAttitudeRange != null ? gimbalAttitudeRange.getPitch() : null;
-        DoubleMinMax rollRange = gimbalAttitudeRange != null ? gimbalAttitudeRange.getRoll() : null;
-        DoubleMinMax yawRange = gimbalAttitudeRange != null ? gimbalAttitudeRange.getYaw() : null;
-
-        if (enablePitch) {
-            double clamped = clampToRange(pitch, pitchRange);
-            if (clamped != pitch) {
-                Log.w(TAG, String.format(Locale.US, "Clamp gimbal pitch %.1f -> %.1f", pitch, clamped));
-            }
-            pitch = clamped;
-        }
-        if (enableRoll) {
-            double clamped = clampToRange(roll, rollRange);
-            if (clamped != roll) {
-                Log.w(TAG, String.format(Locale.US, "Clamp gimbal roll %.1f -> %.1f", roll, clamped));
-            }
-            roll = clamped;
-        }
-        if (enableYaw) {
-            double clamped = clampToRange(yaw, yawRange);
-            if (clamped != yaw) {
-                Log.w(TAG, String.format(Locale.US, "Clamp gimbal yaw %.1f -> %.1f", yaw, clamped));
-            }
-            yaw = clamped;
-        }
-
-        if (!enablePitch && !enableRoll && !enableYaw) {
-            Log.w(TAG, "Skipping gimbal action: no enabled axis after capability/range filtering.");
-            return;
-        }
-
-        GimbalAngleRotation rotation = new GimbalAngleRotation();
-        String rotateMode = param.getRotateMode() != null ? param.getRotateMode().toString() : "";
-        rotation.setMode(rotateMode.contains("RELATIVE")
-                ? GimbalAngleRotationMode.RELATIVE_ANGLE
-                : GimbalAngleRotationMode.ABSOLUTE_ANGLE);
-        rotation.setPitch(pitch);
-        rotation.setRoll(roll);
-        rotation.setYaw(yaw);
-        rotation.setPitchIgnored(!enablePitch);
-        rotation.setRollIgnored(!enableRoll);
-        rotation.setYawIgnored(!enableYaw);
-        rotation.setDuration(Boolean.TRUE.equals(param.getEnableRotateTime()) && param.getRotateTime() != null
-                ? param.getRotateTime()
-                : 1.0);
-        rotation.setJointReferenceUsed(false);
-        rotation.setTimeout(3);
-
-        KeyManager.getInstance().performAction(
-                KeyTools.createKey(GimbalKey.KeyRotateByAngle, ComponentIndexType.LEFT_OR_MAIN),
-                rotation,
-                new CommonCallbacks.CompletionCallbackWithParam<EmptyMsg>() {
-                    @Override
-                    public void onSuccess(EmptyMsg emptyMsg) {
-                        Log.i(TAG, "GIMBAL_ROTATE onSuccess");
-                    }
-
-                    @Override
-                    public void onFailure(@NonNull IDJIError idjiError) {
-                        Log.e(TAG, "GIMBAL_ROTATE onFailure: " + idjiError);
-                    }
-                }
-        );
-    }
-
-    private static double clampToRange(double value, @Nullable DoubleMinMax range) {
-        if (range == null || range.getMin() == null || range.getMax() == null) {
-            return value;
-        }
-        return clamp(value, range.getMin(), range.getMax());
-    }
-
-    private void sendVirtualStickCommand(double pitch, double roll, double yawAngleDeg, double verticalVelocity) {
-        VirtualStickFlightControlParam param = new VirtualStickFlightControlParam();
-        param.setRollPitchCoordinateSystem(FlightCoordinateSystem.GROUND);
-        param.setRollPitchControlMode(RollPitchControlMode.VELOCITY);
-        param.setYawControlMode(YawControlMode.ANGULAR_VELOCITY);
-        param.setVerticalControlMode(VerticalControlMode.VELOCITY);
-        param.setPitch(clamp(roll, -6.0, 6.0));
-        param.setRoll(clamp(pitch, -6.0, 6.0));
-        double yawError = normalizeAngleDegrees(yawAngleDeg - droneHeading);
-        double yawRate = clamp(yawError * 1.2, -45.0, 45.0);
-        param.setYaw(yawRate);
-        param.setVerticalThrottle(clamp(verticalVelocity, -2.0, 2.0));
-        VirtualStickManager.getInstance().sendVirtualStickAdvancedParam(param);
-    }
-
-    private static double clamp(double value, double min, double max) {
-        return Math.max(min, Math.min(max, value));
-    }
-
-    private static double normalizeAngleDegrees(double angleDeg) {
-        double out = angleDeg % 360.0;
-        if (out > 180.0) out -= 360.0;
-        if (out < -180.0) out += 360.0;
-        return out;
     }
 
     private void setHome() {
@@ -1032,11 +892,13 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void enableVirtualStick() {
-        VirtualStickManager.getInstance().enableVirtualStick(new CommonCallbacks.CompletionCallback() {
+        if (droneCommander == null) {
+            return;
+        }
+        droneCommander.enableVirtualStick(new DroneCommander.CommandCallback() {
             @Override
             public void onSuccess() {
                 isVirtualStickEnabled = true;
-                VirtualStickManager.getInstance().setVirtualStickAdvancedModeEnabled(true);
                 tvLog.setText(R.string.vs_enabled);
                 Log.i(TAG, "enableVirtualStick - onSuccess");
             }
@@ -1051,7 +913,10 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void disableVirtualStick() {
-        VirtualStickManager.getInstance().disableVirtualStick(new CommonCallbacks.CompletionCallback() {
+        if (droneCommander == null) {
+            return;
+        }
+        droneCommander.disableVirtualStick(new DroneCommander.CommandCallback() {
             @Override
             public void onSuccess() {
                 isVirtualStickEnabled = false;
@@ -1149,169 +1014,17 @@ public class MainActivity extends AppCompatActivity {
         svCameraStream.setVisibility(View.VISIBLE);
     }
 
-    private void setMissionOnMap(KMZInfo kmzInfo) {
-        if (mapStyle == null || kmzInfo == null) {
+    private void setMissionOnMap() {
+        if (missionWaypoints.isEmpty() || missionMapRenderer == null) {
             return;
         }
-
-        List<WaylineExecuteWaypoint> waypoints;
-        try {
-            waypoints = kmzInfo.getWaylineWaylinesParseInfo()
-                    .getWaylines()
-                    .get(0)
-                    .getWaypoints();
-        } catch (Exception e) {
-            tvLog.setText("KMZ mission data is invalid");
-            return;
-        }
-        if (waypoints == null || waypoints.isEmpty()) {
-            tvLog.setText("KMZ has no waypoints");
-            return;
-        }
-
         double homeLat = droneHomeLocation.getLatitude();
         double homeLon = droneHomeLocation.getLongitude();
         if (!checkGPSCoordinates(homeLat, homeLon)) {
-            homeLat = waypoints.get(0).getLocation().getLatitude();
-            homeLon = waypoints.get(0).getLocation().getLongitude();
+            homeLat = missionWaypoints.get(0).getLocation().getLatitude();
+            homeLon = missionWaypoints.get(0).getLocation().getLongitude();
         }
-
-        renderMissionWaypointsOnMap(waypoints, homeLat, homeLon);
-    }
-
-    private void renderMissionWaypointsOnMap(@NonNull List<WaylineExecuteWaypoint> waypoints, double homeLat, double homeLon) {
-        if (mapStyle == null || waypoints.isEmpty()) {
-            return;
-        }
-
-        // Remove existing layers and sources to avoid duplication
-        if (mapStyle.getLayer("mission-home-layer") != null) {
-            mapStyle.removeLayer("mission-home-layer");
-        }
-        if (mapStyle.getLayer("waypoint-marker-layer") != null) {
-            mapStyle.removeLayer("waypoint-marker-layer");
-        }
-        if (mapStyle.getLayer("home-to-firstwaypoint-layer") != null) {
-            mapStyle.removeLayer("home-to-firstwaypoint-layer");
-        }
-        if (mapStyle.getLayer("lastwaypoint-to-home-layer") != null) {
-            mapStyle.removeLayer("lastwaypoint-to-home-layer");
-        }
-        if (mapStyle.getLayer("waypoint-to-waypoint-layer") != null) {
-            mapStyle.removeLayer("waypoint-to-waypoint-layer");
-        }
-        if (mapStyle.getSource("mission-home-source") != null) {
-            mapStyle.removeSource("mission-home-source");
-        }
-        if (mapStyle.getSource("waypoint-marker-source") != null) {
-            mapStyle.removeSource("waypoint-marker-source");
-        }
-        if (mapStyle.getSource("home-to-firstwaypoint-source") != null) {
-            mapStyle.removeSource("home-to-firstwaypoint-source");
-        }
-        if (mapStyle.getSource("lastwaypoint-to-home-source") != null) {
-            mapStyle.removeSource("lastwaypoint-to-home-source");
-        }
-        if (mapStyle.getSource("waypoint-to-waypoint-source") != null) {
-            mapStyle.removeSource("waypoint-to-waypoint-source");
-        }
-
-        // Add magenta line from home to the first waypoint
-        List<Point> homeToFirstWaypointPoints = new ArrayList<>();
-        homeToFirstWaypointPoints.add(Point.fromLngLat(homeLon, homeLat));
-        WaylineExecuteWaypoint firstWaypoint = waypoints.get(0);  // Get the first waypoint
-        homeToFirstWaypointPoints.add(Point.fromLngLat(firstWaypoint.getLocation().getLongitude(), firstWaypoint.getLocation().getLatitude()));
-
-        GeoJsonSource homeToFirstWaypointSource = new GeoJsonSource("home-to-firstwaypoint-source", LineString.fromLngLats(homeToFirstWaypointPoints));
-        mapStyle.addSource(homeToFirstWaypointSource);
-
-        LineLayer homeToFirstWaypointLayer = new LineLayer("home-to-firstwaypoint-layer", "home-to-firstwaypoint-source");
-        homeToFirstWaypointLayer.setProperties(
-                lineColor("magenta"),
-                lineWidth(2.0f),
-                lineDasharray(new Float[]{2f, 4f})
-        );
-        mapStyle.addLayer(homeToFirstWaypointLayer); // Add line layer from home to first waypoint
-
-        // Add magenta line from last waypoint to home
-        List<Point> lastWaypointToHomePoints = new ArrayList<>();
-        WaylineExecuteWaypoint lastWaypoint = waypoints.get(waypoints.size() - 1);  // Get the last waypoint
-        lastWaypointToHomePoints.add(Point.fromLngLat(lastWaypoint.getLocation().getLongitude(), lastWaypoint.getLocation().getLatitude()));
-        lastWaypointToHomePoints.add(Point.fromLngLat(homeLon, homeLat));
-
-        GeoJsonSource lastWaypointToHomeSource = new GeoJsonSource("lastwaypoint-to-home-source", LineString.fromLngLats(lastWaypointToHomePoints));
-        mapStyle.addSource(lastWaypointToHomeSource);
-
-        LineLayer lastWaypointToHomeLayer = new LineLayer("lastwaypoint-to-home-layer", "lastwaypoint-to-home-source");
-        lastWaypointToHomeLayer.setProperties(
-                lineColor("magenta"),
-                lineWidth(2.0f),
-                lineDasharray(new Float[]{2f, 4f})
-        );
-        mapStyle.addLayer(lastWaypointToHomeLayer); // Add line layer from last waypoint to home
-
-        // Add blue lines connecting the waypoints (except home to first and last to home)
-        List<Point> waypointToWaypointPoints = new ArrayList<>();
-        for (int i = 0; i < waypoints.size() - 1; i++) {
-            WaylineExecuteWaypoint currentWaypoint = waypoints.get(i);
-            WaylineExecuteWaypoint nextWaypoint = waypoints.get(i + 1);
-
-            waypointToWaypointPoints.add(Point.fromLngLat(currentWaypoint.getLocation().getLongitude(), currentWaypoint.getLocation().getLatitude()));
-            waypointToWaypointPoints.add(Point.fromLngLat(nextWaypoint.getLocation().getLongitude(), nextWaypoint.getLocation().getLatitude()));
-        }
-
-        // Create GeoJsonSource for the waypoint-to-waypoint connections
-        GeoJsonSource waypointToWaypointSource = new GeoJsonSource("waypoint-to-waypoint-source", LineString.fromLngLats(waypointToWaypointPoints));
-        mapStyle.addSource(waypointToWaypointSource);
-
-        // Create LineLayer for waypoint-to-waypoint connections (blue)
-        LineLayer waypointToWaypointLayer = new LineLayer("waypoint-to-waypoint-layer", "waypoint-to-waypoint-source");
-        waypointToWaypointLayer.setProperties(
-                lineColor("orange"),
-                lineWidth(2.0f)
-        );
-
-        // Add line layer for waypoint-to-waypoint connections
-        mapStyle.addLayer(waypointToWaypointLayer);
-
-        // Add home location marker (green) at the end
-        mapStyle.addImage("home-marker-icon", BitmapFactory.decodeResource(getResources(), R.drawable.home_location));
-        GeoJsonSource homeMarkerSource = new GeoJsonSource("mission-home-source");
-        List<Feature> homeFeatures = new ArrayList<>();
-        homeFeatures.add(Feature.fromGeometry(Point.fromLngLat(homeLon, homeLat)));
-        homeMarkerSource.setGeoJson(FeatureCollection.fromFeatures(homeFeatures));
-        mapStyle.addSource(homeMarkerSource);
-
-        SymbolLayer homeMarkerLayer = new SymbolLayer("mission-home-layer", "mission-home-source");
-        homeMarkerLayer.setProperties(
-                iconImage("home-marker-icon"),
-                iconAllowOverlap(true),
-                iconIgnorePlacement(true)
-        );
-        mapStyle.addLayer(homeMarkerLayer);
-
-        // Add waypoint markers (red) at the end
-        mapStyle.addImage("waypoint-marker-icon", BitmapFactory.decodeResource(getResources(), R.drawable.marker_red));
-        GeoJsonSource waypointMarkerSource = new GeoJsonSource("waypoint-marker-source");
-        List<Feature> waypointFeatures = new ArrayList<>();
-
-        for (WaylineExecuteWaypoint waypoint : waypoints) {
-            double latitude = waypoint.getLocation().getLatitude();
-            double longitude = waypoint.getLocation().getLongitude();
-            waypointFeatures.add(Feature.fromGeometry(Point.fromLngLat(longitude, latitude)));
-        }
-
-        waypointMarkerSource.setGeoJson(FeatureCollection.fromFeatures(waypointFeatures));
-        mapStyle.addSource(waypointMarkerSource);
-
-        SymbolLayer waypointMarkerLayer = new SymbolLayer("waypoint-marker-layer", "waypoint-marker-source");
-        waypointMarkerLayer.setProperties(
-                iconImage("waypoint-marker-icon"),
-                iconAllowOverlap(true),
-                iconIgnorePlacement(true)
-        );
-
-        mapStyle.addLayer(waypointMarkerLayer);
+        missionMapRenderer.renderMission(mapStyle, missionWaypoints, homeLat, homeLon);
     }
 
     private void updateDroneHomeAndCurrentLocation() {
@@ -1390,16 +1103,7 @@ public class MainActivity extends AppCompatActivity {
             @Override
             public void onProductConnect(int productId) {
                 Log.i(TAG, "onProductConnect: " + productId);
-
-                listenerDroneConnection();
-                listenerBatteryPercent();
-                listenerAircraftAttitude();
-                listenerHomeLocation();
-                listenerAircraftLocation3D();
-                listenerGimbalAttitude();
-                listenerGimbalYawCapability();
-                listenerGimbalAttitudeRange();
-                listenerAircraftVelocity();
+                startDroneStateListeners();
             }
 
             @Override
@@ -1422,138 +1126,89 @@ public class MainActivity extends AppCompatActivity {
         });
     }
 
-    private void listenerAircraftVelocity() {
-        KeyManager.getInstance().listen(KeyTools.createKey(FlightControllerKey.KeyAircraftVelocity), this, (velocity3D, t1) -> {
-            if (velocity3D != null) {
-                double speedX = velocity3D.getX();
-                double speedY = velocity3D.getY();
-                double speedZ = -velocity3D.getZ();  // Keep negative to have takeoff +, landing -
-
-                double speedXY = Math.sqrt(speedX * speedX + speedY * speedY);
-
-                tvDroneSpeed.setText(String.format(Locale.US, "%.1f, %.1f", speedXY, speedZ));
+    private void startDroneStateListeners() {
+        if (droneStateRepository == null) {
+            return;
+        }
+        droneStateRepository.start(this, new DroneStateRepository.Callbacks() {
+            @Override
+            public void onConnectionChanged(@Nullable Boolean connected) {
+                runOnUiThread(() -> tvDroneConnected.setText(
+                        connected != null ? connected.toString() : getString(R.string.false_output)
+                ));
             }
-        });
-    }
 
-    private void listenerGimbalAttitude() {
-        KeyManager.getInstance().listen(KeyTools.createKey(GimbalKey.KeyGimbalAttitude), this, (attitude, t1) -> {
-//            // Get gimbal attitude data. The yaw angle uses the north east down coordinate system.
-//            // If you need to get the yaw angle of the gimbal relative to the nose of the aircraft, please call KeyYawRelativeToAircraftHeading.
-//            if (attitude != null) {
-//                tvGimbalPitchYaw.setText(String.format(
-//                        "%s, %s",
-//                        integerFormat.format(attitude.getPitch()),
-//                        integerFormat.format(attitude.getYaw())
-//                ));
-//            }
-        });
-    }
-
-    private void listenerGimbalYawCapability() {
-        KeyManager.getInstance().listen(
-                KeyTools.createKey(GimbalKey.KeyYawAdjustSupported, ComponentIndexType.LEFT_OR_MAIN),
-                this,
-                (isSupported, t1) -> {
-                    if (isSupported == null) {
-                        return;
+            @Override
+            public void onBatteryPercentChanged(@Nullable Integer percent) {
+                runOnUiThread(() -> {
+                    if (percent != null) {
+                        tvBatteryPercentage.setText(getString(R.string.battery_percentage_format, percent));
+                    } else {
+                        tvBatteryPercentage.setText(getString(R.string.empty_label));
                     }
-                    hasGimbalYawCapabilityInfo = true;
-                    gimbalYawAdjustSupported = isSupported;
-                    Log.i(TAG, "Gimbal yaw adjust supported: " + isSupported);
-                }
-        );
-    }
+                });
+            }
 
-    private void listenerGimbalAttitudeRange() {
-        KeyManager.getInstance().listen(
-                KeyTools.createKey(GimbalKey.KeyGimbalAttitudeRange, ComponentIndexType.LEFT_OR_MAIN),
-                this,
-                (range, t1) -> {
-                    if (range == null) {
-                        return;
-                    }
-                    gimbalAttitudeRange = range;
-                    Log.i(TAG, "Gimbal range pitch=" + String.valueOf(range.getPitch())
-                            + " roll=" + String.valueOf(range.getRoll())
-                            + " yaw=" + String.valueOf(range.getYaw()));
-                }
-        );
-    }
+            @Override
+            public void onAircraftAttitudeChanged(double yawDeg) {
+                droneHeading = yawDeg;
+                runOnUiThread(() -> tvDroneYaw.setText(String.format("%s", integerFormat.format(yawDeg))));
+            }
 
-    private void listenerAircraftLocation3D() {
-        KeyManager.getInstance().listen(KeyTools.createKey(FlightControllerKey.KeyAircraftLocation3D), this, (locationCoordinate3D, t1) -> {
-            if (locationCoordinate3D != null) {
-                if (checkGPSCoordinates(locationCoordinate3D.getLatitude(), locationCoordinate3D.getLongitude())) {
-                    droneCurrentLocation.setLatitude(locationCoordinate3D.getLatitude());
-                    droneCurrentLocation.setLongitude(locationCoordinate3D.getLongitude());
+            @Override
+            public void onHomeLocationChanged(double latitude, double longitude) {
+                if (!checkGPSCoordinates(latitude, longitude)) {
+                    Log.i(TAG, "Ignoring invalid home location: " + latitude + ", " + longitude);
+                    return;
                 }
-                droneAltitude = locationCoordinate3D.getAltitude();
+                droneHomeLocation.setLatitude(latitude);
+                droneHomeLocation.setLongitude(longitude);
+                runOnUiThread(() -> {
+                    tvLog.setText(getString(R.string.home_point_updated, latitude, longitude));
+                    updateDroneHomeAndCurrentLocation();
+                });
+                Log.i(TAG, "droneHomeLocation: " + latitude + ", " + longitude);
+            }
 
+            @Override
+            public void onAircraftLocation3DChanged(double latitude, double longitude, double altitude) {
+                if (checkGPSCoordinates(latitude, longitude)) {
+                    droneCurrentLocation.setLatitude(latitude);
+                    droneCurrentLocation.setLongitude(longitude);
+                }
+                droneAltitude = altitude;
                 if (droneCurrentLocation.getLatitude() != 0 && droneHomeLocation.getLatitude() == 0) {
                     setHome();
                 }
-
-                tvDroneAltitude.setText(String.format("%s", decimalFormat.format(locationCoordinate3D.getAltitude())));
-
-                Location homeLocation = new Location("home");
-                homeLocation.setLatitude(droneHomeLocation.getLatitude());
-                homeLocation.setLongitude(droneHomeLocation.getLongitude());
-
-                Location currentLocation = new Location("current");
-                currentLocation.setLatitude(droneCurrentLocation.getLatitude());
-                currentLocation.setLongitude(droneCurrentLocation.getLongitude());
-
-                updateDroneHomeAndCurrentLocation();
+                runOnUiThread(() -> {
+                    tvDroneAltitude.setText(String.format("%s", decimalFormat.format(altitude)));
+                    updateDroneHomeAndCurrentLocation();
+                });
             }
-        });
-    }
 
-    private void listenerHomeLocation() {
-        KeyManager.getInstance().listen(KeyTools.createKey(FlightControllerKey.KeyHomeLocation), this, (locationCoordinate2D, t1) -> {
-            if (locationCoordinate2D != null) {
-                if (!checkGPSCoordinates(locationCoordinate2D.getLatitude(), locationCoordinate2D.getLongitude())) {
-                    Log.i(TAG, "Ignoring invalid home location: " + locationCoordinate2D.getLatitude() + ", " + locationCoordinate2D.getLongitude());
-                    return;
+            @Override
+            public void onAircraftVelocityChanged(double speedX, double speedY, double speedZ) {
+                double speedXY = Math.sqrt(speedX * speedX + speedY * speedY);
+                double speedZUi = -speedZ;
+                runOnUiThread(() -> tvDroneSpeed.setText(String.format(Locale.US, "%.1f, %.1f", speedXY, speedZUi)));
+            }
+
+            @Override
+            public void onGimbalYawAdjustSupported(boolean isSupported) {
+                if (droneCommander != null) {
+                    droneCommander.updateGimbalYawAdjustCapability(isSupported);
                 }
-                tvLog.setText(getString(R.string.home_point_updated, locationCoordinate2D.getLatitude(), locationCoordinate2D.getLongitude()));
-//                tvLog.setText("Home point updated! " + locationCoordinate2D.getLatitude() + ", " + locationCoordinate2D.getLongitude());
-
-                Log.i(TAG, "droneHomeLocation: " + locationCoordinate2D.getLatitude() + ", " + locationCoordinate2D.getLongitude());
-                droneHomeLocation.setLatitude(locationCoordinate2D.getLatitude());
-                droneHomeLocation.setLongitude(locationCoordinate2D.getLongitude());
-
-                updateDroneHomeAndCurrentLocation();
-//                centerCameraOnDroneCurrentLocation(); // maybe too much, let's see...
+                Log.i(TAG, "Gimbal yaw adjust supported: " + isSupported);
             }
-        });
-    }
 
-    private void listenerAircraftAttitude() {
-        KeyManager.getInstance().listen(KeyTools.createKey(FlightControllerKey.KeyAircraftAttitude), this, (attitude, t1) -> {
-            if (attitude != null) {
-                droneHeading = attitude.getYaw();
-                tvDroneYaw.setText(String.format("%s", integerFormat.format(attitude.getYaw())));
-            }
-        });
-    }
-
-    private void listenerBatteryPercent() {
-        KeyManager.getInstance().listen(KeyTools.createKey(FlightControllerKey.KeyBatteryPowerPercent), this, (oldValue, newValue) -> {
-            if (newValue != null) {
-                tvBatteryPercentage.setText(getString(R.string.battery_percentage_format, newValue));
-            } else {
-                tvBatteryPercentage.setText(getString(R.string.empty_label));
-            }
-        });
-    }
-
-    private void listenerDroneConnection() {
-        KeyManager.getInstance().listen(KeyTools.createKey(FlightControllerKey.KeyConnection), this, (oldValue, newValue) -> {
-            if (newValue != null) {
-                tvDroneConnected.setText(newValue.toString());
-            } else {
-                tvDroneConnected.setText(getString(R.string.false_output));
+            @Override
+            public void onGimbalAttitudeRangeChanged(@NonNull GimbalAttitudeRange range) {
+                if (droneCommander != null) {
+                    droneCommander.updateGimbalAttitudeRange(range);
+                }
+                Log.i(TAG, "Gimbal range pitch=" + String.valueOf(range.getPitch())
+                        + " roll=" + String.valueOf(range.getRoll())
+                        + " yaw=" + String.valueOf(range.getYaw()));
             }
         });
     }
