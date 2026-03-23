@@ -18,6 +18,8 @@ import android.graphics.Color;
 import android.location.Location;
 import android.net.Uri;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.util.Log;
 import android.view.SurfaceView;
 import android.view.View;
@@ -50,12 +52,16 @@ import org.maplibre.geojson.Point;
 
 import java.io.BufferedOutputStream;
 import java.io.File;
+import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.text.DecimalFormat;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 
 import dji.sdk.keyvalue.key.CameraKey;
 import dji.sdk.keyvalue.key.FlightControllerKey;
@@ -65,9 +71,17 @@ import dji.sdk.keyvalue.value.camera.CameraVideoStreamSourceType;
 import dji.sdk.keyvalue.value.common.ComponentIndexType;
 import dji.sdk.keyvalue.value.common.EmptyMsg;
 import dji.sdk.keyvalue.value.common.LocationCoordinate2D;
+import dji.sdk.keyvalue.value.flightcontroller.FlightCoordinateSystem;
 import dji.sdk.keyvalue.value.flightcontroller.GPSSignalLevel;
+import dji.sdk.keyvalue.value.flightcontroller.RollPitchControlMode;
+import dji.sdk.keyvalue.value.flightcontroller.VerticalControlMode;
+import dji.sdk.keyvalue.value.flightcontroller.VirtualStickFlightControlParam;
+import dji.sdk.keyvalue.value.flightcontroller.YawControlMode;
+import dji.sdk.wpmz.value.mission.Wayline;
+import dji.sdk.wpmz.value.mission.WaylineActionGroup;
 import dji.sdk.wpmz.value.mission.WaylineActionInfo;
 import dji.sdk.wpmz.value.mission.WaylineExecuteWaypoint;
+import dji.sdk.wpmz.value.mission.WaylineLocationCoordinate2D;
 import dji.v5.common.callback.CommonCallbacks;
 import dji.v5.common.error.IDJIError;
 import dji.v5.common.register.DJISDKInitEvent;
@@ -76,8 +90,6 @@ import dji.v5.manager.SDKManager;
 import dji.v5.manager.aircraft.simulator.InitializationSettings;
 import dji.v5.manager.aircraft.simulator.SimulatorManager;
 import dji.v5.manager.aircraft.virtualstick.VirtualStickManager;
-import dji.v5.manager.aircraft.waypoint3.WaypointActionListener;
-import dji.v5.manager.aircraft.waypoint3.WaypointMissionManager;
 import dji.v5.manager.datacenter.MediaDataCenter;
 import dji.v5.manager.datacenter.camera.CameraStreamManager;
 import dji.v5.manager.datacenter.media.MediaFile;
@@ -93,6 +105,10 @@ import dji.v5.manager.interfaces.SDKManagerCallback;
 public class MainActivity extends AppCompatActivity {
     private static final String TAG = MainActivity.class.getSimpleName();
     private static final String FALLBACK_MAP_STYLE_URL = "https://demotiles.maplibre.org/style.json";
+    private static final double EARTH_RADIUS_METERS = 6378137.0;
+    private static final long VS_MISSION_TICK_MS = 200L;
+    private static final double WP_REACHED_DISTANCE_METERS = 1.5;
+    private static final double WP_REACHED_ALTITUDE_METERS = 1.0;
     private static final int PICK_KMZ_FILE_REQUEST = 1234;
     private static final int REQUEST_CODE_OPEN_DOCUMENT_TREE = 5678;
     private final DecimalFormat decimalFormat = new DecimalFormat("#.##");
@@ -121,9 +137,27 @@ public class MainActivity extends AppCompatActivity {
     private boolean isMissionStarted = false;
     private boolean isMissionPaused = false;
     private boolean isVirtualStickEnabled = false;
+    private boolean isSimulatorEnabled = false;
     private boolean mapFallbackApplied = false;
     private double droneHeading;
+    private double droneAltitude;
     private String currentMissionPath;
+    private final List<WaylineExecuteWaypoint> missionWaypoints = new ArrayList<>();
+    private final List<WaylineActionGroup> missionActionGroups = new ArrayList<>();
+    private final Set<Integer> executedActionGroupIds = new HashSet<>();
+    private final Handler vsMissionHandler = new Handler(Looper.getMainLooper());
+    private int currentWaypointCursor = 0;
+    private boolean isMissionLoaded = false;
+    private Wayline loadedWayline;
+    private final Runnable virtualStickMissionLoop = new Runnable() {
+        @Override
+        public void run() {
+            runVirtualStickMissionTick();
+            if (isMissionStarted && !isMissionPaused) {
+                vsMissionHandler.postDelayed(this, VS_MISSION_TICK_MS);
+            }
+        }
+    };
 
     public static boolean checkGPSCoordinates(double latitude, double longitude) {
         return (latitude > -90 && latitude < 90 && longitude > -180 && longitude < 180) && (latitude != 0f && longitude != 0f);
@@ -361,12 +395,12 @@ public class MainActivity extends AppCompatActivity {
 
                 gMap.setCameraPosition(new CameraPosition.Builder()
                         .target(new LatLng(droneHomeLocation.getLatitude(), droneHomeLocation.getLongitude()))
-                        .zoom(18)
+                        .zoom(17)
                         .build());
 
                 String key = BuildConfig.MAPTILER_API_KEY;
                 // Find other maps in https://cloud.maptiler.com/maps/
-                String mapId = "satellite";
+                String mapId = "streets-v2";
                 String styleUrl = "https://api.maptiler.com/maps/" + mapId + "/style.json?key=" + key;
                 if (key == null || key.trim().isEmpty()) {
                     styleUrl = FALLBACK_MAP_STYLE_URL;
@@ -452,108 +486,117 @@ public class MainActivity extends AppCompatActivity {
     private void onActivityResultLoadMission(Uri uri) {
         File tempFile = copyFileToTempFolder(this, uri);
         if (tempFile != null) {
-            currentMissionPath = tempFile.getAbsolutePath();
+            processMissionFile(tempFile);
+        }
+    }
 
-            KMZInfo kmzInfo = WPMZManager.getInstance().getKMZInfo(currentMissionPath);
-            if (kmzInfo == null) {
-                tvLog.setText("Invalid KMZ file");
+    private void processMissionFile(@NonNull File missionFile) {
+        currentMissionPath = missionFile.getAbsolutePath();
+
+        KMZInfo kmzInfo = WPMZManager.getInstance().getKMZInfo(currentMissionPath);
+        if (kmzInfo == null) {
+            tvLog.setText("Invalid KMZ file");
+            return;
+        }
+
+        try {
+            List<Wayline> waylines = kmzInfo.getWaylineWaylinesParseInfo().getWaylines();
+            if (waylines == null || waylines.isEmpty()) {
+                tvLog.setText("KMZ has no waylines");
                 return;
             }
+            loadedWayline = waylines.get(0);
+            missionWaypoints.clear();
+            missionActionGroups.clear();
+            executedActionGroupIds.clear();
 
-            setMissionOnMap(kmzInfo);
+            if (loadedWayline.getWaypoints() != null) {
+                missionWaypoints.addAll(loadedWayline.getWaypoints());
+            }
+            if (loadedWayline.getActionGroups() != null) {
+                missionActionGroups.addAll(loadedWayline.getActionGroups());
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "Failed to parse KMZ waylines", e);
+            tvLog.setText("KMZ parse error");
+            return;
+        }
 
-            WaypointMissionManager.getInstance().pushKMZFileToAircraft(currentMissionPath, new CommonCallbacks.CompletionCallbackWithProgress<>() {
-                @Override
-                public void onProgressUpdate(Double progress) {
-                    Log.d(TAG, "Upload progress: " + progress + "%");
+        if (missionWaypoints.isEmpty()) {
+            tvLog.setText("KMZ has no waypoints");
+            return;
+        }
 
-                    tvLog.setText(String.format(Locale.US, "Upload progress: %.2f%%", progress));
+        setMissionOnMap(kmzInfo);
+        logParsedWaypointsAndActions();
+
+        isMissionLoaded = true;
+        isMissionStarted = false;
+        isMissionPaused = false;
+        currentWaypointCursor = 0;
+        btnStartStopMission.setEnabled(true);
+        btnStartStopMission.setText(getString(R.string.start_mission_button));
+        btnPauseResumeMission.setEnabled(false);
+        btnPauseResumeMission.setText(getString(R.string.pause_mission_button));
+        tvLog.setText(String.format(Locale.US, "KMZ loaded: %d WP, %d action groups", missionWaypoints.size(), missionActionGroups.size()));
+    }
+
+    private void logParsedWaypointsAndActions() {
+        Log.i(TAG, "===== Parsed KMZ Mission =====");
+        for (WaylineExecuteWaypoint waypoint : missionWaypoints) {
+            if (waypoint == null || waypoint.getLocation() == null) {
+                continue;
+            }
+            int wpIndex = waypoint.getWaypointIndex() != null ? waypoint.getWaypointIndex() : -1;
+            double lat = waypoint.getLocation().getLatitude();
+            double lon = waypoint.getLocation().getLongitude();
+            Double height = waypoint.getExecuteHeight();
+            Log.i(TAG, String.format(Locale.US, "WP %d -> lat=%.8f lon=%.8f h=%.2f",
+                    wpIndex, lat, lon, height != null ? height : 0.0));
+
+            boolean hasActions = false;
+            for (WaylineActionGroup actionGroup : missionActionGroups) {
+                if (actionGroup == null) {
+                    continue;
                 }
-
-                @Override
-                public void onSuccess() {
-                    Log.i(TAG, "KMZ mission uploaded successfully.");
-
-                    tvLog.setText(getString(R.string.kmz_upload_success));
-
-                    btnStartStopMission.setEnabled(true);
-                    btnStartStopMission.setText(getString(R.string.start_mission_button));
-
-                    WaypointMissionManager.getInstance().addWaypointActionListener(new WaypointActionListener() {
-                        @Override
-                        public void onExecutionStart(int actionId) {
-                            Log.i(TAG, "onExecutionStart - actionId=" + actionId);
-                        }
-
-                        @Override
-                        public void onExecutionFinish(int actionId, @Nullable IDJIError error) {
-                            Log.i(TAG, "onExecutionFinish - actionId=" + actionId);
-                        }
-
-                        @Override
-                        public void onExecutionStart(int actionGroup, int actionId) {
-                            Log.i(TAG, "onExecutionStart - actionGroup=" + actionGroup + ", actionId=" + actionId);
-
-                            WaylineActionInfo actionInfo = WPMZManager.getInstance().getKMZInfo(currentMissionPath)
-                                    .getWaylineWaylinesParseInfo()
-                                    .getWaylines().get(0)
-                                    .getActionGroups().get(actionGroup)
-                                    .getActions().get(actionId);
-
-                            // Get the action type
-                            String actionType = actionInfo.getActionType().toString();
-
-                            String actionDetails = actionType + ": ";
-
-                            // Evaluate based on action type
-                            switch (actionType) {
-                                case "ROTATE_YAW":
-                                    actionDetails += "Heading: " + actionInfo.getAircraftRotateYawParam().getHeading().toString();
-                                    break;
-
-                                case "HOVER":
-                                    actionDetails += "Time: " + actionInfo.getAircraftHoverParam().getHoverTime().toString();
-                                    break;
-
-                                case "GIMBAL_ROTATE":
-                                    actionDetails += "Pitch: " + actionInfo.getGimbalRotateParam().getPitch().toString()
-                                            + ", Yaw: " + actionInfo.getGimbalRotateParam().getYaw().toString();
-                                    break;
-
-                                case "FOCUS":
-                                    actionDetails += "X: " + actionInfo.getFocusParam().getFocus_x().toString()
-                                            + ", Y: " + actionInfo.getFocusParam().getFocus_y().toString();
-                                    break;
-
-                                case "ZOOM":
-                                    actionDetails += "Focal Length: " + actionInfo.getZoomParam().getFocalLength().toString();
-                                    break;
-
-                                case "TAKE_PHOTO":
-                                    actionDetails += "Suffix: " + actionInfo.getTakePhotoParam().getFileSuffix();
-                                    break;
-
-                                default:
-                                    actionDetails = "UNKNOWN ACTION";
-                                    break;
-                            }
-
-                            // Update the log with the action type and details
-                            tvLog.setText(getString(R.string.starting_wp_action, actionGroup, actionId, actionDetails));
-                        }
-
-                        @Override
-                        public void onExecutionFinish(int actionGroup, int actionId, @Nullable IDJIError error) {
-                            Log.i(TAG, "onExecutionFinish - actionGroup=" + actionGroup + ", actionId=" + actionId);
-                        }
-                    });
+                Integer start = actionGroup.getStartIndex();
+                Integer end = actionGroup.getEndIndex();
+                if (start == null || end == null || wpIndex < start || wpIndex > end) {
+                    continue;
                 }
-
-                @Override
-                public void onFailure(@NonNull IDJIError idjiError) {
-                    Log.e(TAG, "Failed to upload KMZ mission: " + idjiError);
+                hasActions = true;
+                Integer groupId = actionGroup.getGroupId();
+                List<WaylineActionInfo> actions = actionGroup.getActions();
+                if (actions == null || actions.isEmpty()) {
+                    Log.i(TAG, String.format(Locale.US, "  - group %s: no actions", String.valueOf(groupId)));
+                    continue;
                 }
-            });
+                for (int i = 0; i < actions.size(); i++) {
+                    Log.i(TAG, String.format(Locale.US, "  - group %s action %d: %s",
+                            String.valueOf(groupId), i, describeAction(actions.get(i))));
+                }
+            }
+            if (!hasActions) {
+                Log.i(TAG, "  - no decoded actions");
+            }
+        }
+        Log.i(TAG, "===== End Parsed KMZ Mission =====");
+    }
+
+    private boolean loadBundledMission() {
+        File missionFile = new File(getCacheDir(), "mission.kmz");
+        try (InputStream inputStream = getResources().openRawResource(R.raw.mission);
+             FileOutputStream outputStream = new FileOutputStream(missionFile, false)) {
+            byte[] buffer = new byte[8192];
+            int read;
+            while ((read = inputStream.read(buffer)) != -1) {
+                outputStream.write(buffer, 0, read);
+            }
+            processMissionFile(missionFile);
+            return true;
+        } catch (Exception e) {
+            Log.e(TAG, "Failed to load bundled mission", e);
+            return false;
         }
     }
 
@@ -694,98 +737,319 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void loadMission() {
-        if (droneHomeLocation.getLatitude() == 0) {
+        double startLat;
+        double startLon;
+        if (checkGPSCoordinates(droneCurrentLocation.getLatitude(), droneCurrentLocation.getLongitude())) {
+            startLat = droneCurrentLocation.getLatitude();
+            startLon = droneCurrentLocation.getLongitude();
+        } else if (checkGPSCoordinates(droneHomeLocation.getLatitude(), droneHomeLocation.getLongitude())) {
+            startLat = droneHomeLocation.getLatitude();
+            startLon = droneHomeLocation.getLongitude();
+        } else {
             tvLog.setText(getString(R.string.home_point_unknown));
             return;
         }
 
-        openFileChooser();
+        double northTargetLat = startLat + Math.toDegrees(50.0 / EARTH_RADIUS_METERS);
+        double northTargetLon = startLon;
+        double eastTargetLat = northTargetLat;
+        double eastTargetLon = northTargetLon + Math.toDegrees(50.0 / (EARTH_RADIUS_METERS * Math.cos(Math.toRadians(northTargetLat))));
+
+        missionWaypoints.clear();
+        missionActionGroups.clear();
+        executedActionGroupIds.clear();
+
+        WaylineExecuteWaypoint waypoint0 = new WaylineExecuteWaypoint();
+        waypoint0.setWaypointIndex(0);
+        WaylineLocationCoordinate2D location0 = new WaylineLocationCoordinate2D();
+        location0.setLatitude(northTargetLat);
+        location0.setLongitude(northTargetLon);
+        waypoint0.setLocation(location0);
+        waypoint0.setExecuteHeight(10.0);
+        missionWaypoints.add(waypoint0);
+
+        WaylineExecuteWaypoint waypoint1 = new WaylineExecuteWaypoint();
+        waypoint1.setWaypointIndex(1);
+        WaylineLocationCoordinate2D location1 = new WaylineLocationCoordinate2D();
+        location1.setLatitude(eastTargetLat);
+        location1.setLongitude(eastTargetLon);
+        waypoint1.setLocation(location1);
+        waypoint1.setExecuteHeight(10.0);
+        missionWaypoints.add(waypoint1);
+
+        renderMissionWaypointsOnMap(missionWaypoints, startLat, startLon);
+        logParsedWaypointsAndActions();
+
+        isMissionLoaded = true;
+        isMissionStarted = false;
+        isMissionPaused = false;
+        currentWaypointCursor = 0;
+        loadedWayline = null;
+        currentMissionPath = null;
+        btnStartStopMission.setEnabled(true);
+        btnStartStopMission.setText(getString(R.string.start_mission_button));
+        btnPauseResumeMission.setEnabled(false);
+        btnPauseResumeMission.setText(getString(R.string.pause_mission_button));
+        tvLog.setText(String.format(
+                Locale.US,
+                "Baseline mission loaded: WP0 +50m N (%.6f, %.6f), WP1 +50m E (%.6f, %.6f)",
+                northTargetLat, northTargetLon, eastTargetLat, eastTargetLon
+        ));
     }
 
     private void startMission() {
-        WaypointMissionManager.getInstance().startMission("mission", new CommonCallbacks.CompletionCallback() {
-            @Override
-            public void onSuccess() {
-                Log.i(TAG, "startMission - onClick - onSuccess");
-                isMissionStarted = true;
-                btnStartStopMission.setText(getString(R.string.stop_mission_button));
-                btnPauseResumeMission.setEnabled(true);
-                btnPauseResumeMission.setText(getString(R.string.pause_mission_button));
-            }
+        if (!isMissionLoaded || missionWaypoints.isEmpty()) {
+            tvLog.setText("Load a mission first");
+            return;
+        }
+        if (!isVirtualStickEnabled) {
+            tvLog.setText("Enable VS first");
+            return;
+        }
+        if (!checkGPSCoordinates(droneCurrentLocation.getLatitude(), droneCurrentLocation.getLongitude())
+                && isSimulatorEnabled
+                && checkGPSCoordinates(droneHomeLocation.getLatitude(), droneHomeLocation.getLongitude())) {
+            droneCurrentLocation.setLatitude(droneHomeLocation.getLatitude());
+            droneCurrentLocation.setLongitude(droneHomeLocation.getLongitude());
+        }
+        if (!checkGPSCoordinates(droneCurrentLocation.getLatitude(), droneCurrentLocation.getLongitude())) {
+            tvLog.setText("Current GPS not valid");
+            return;
+        }
 
-            @Override
-            public void onFailure(@NonNull IDJIError idjiError) {
-                Log.i(TAG, "startMission - onClick - onFailure: " + idjiError);
-            }
-        });
+        executedActionGroupIds.clear();
+        currentWaypointCursor = 0;
+        if (droneAltitude < 0.8) {
+            tvLog.setText("VS mission: auto takeoff...");
+            KeyManager.getInstance().performAction(
+                    KeyTools.createKey(FlightControllerKey.KeyStartTakeoff),
+                    new CommonCallbacks.CompletionCallbackWithParam<EmptyMsg>() {
+                        @Override
+                        public void onSuccess(EmptyMsg emptyMsg) {
+                            vsMissionHandler.postDelayed(() -> beginMissionLoop(0), 4500);
+                        }
+
+                        @Override
+                        public void onFailure(@NonNull IDJIError idjiError) {
+                            Log.i(TAG, "startTakeoff - onFailure: " + idjiError);
+                            // Continue anyway in case simulator is already in flying state.
+                            beginMissionLoop(0);
+                        }
+                    }
+            );
+            return;
+        }
+        beginMissionLoop(0);
+    }
+
+    private void beginMissionLoop(int startCursor) {
+        currentWaypointCursor = startCursor;
+        isMissionStarted = true;
+        isMissionPaused = false;
+        btnStartStopMission.setText(getString(R.string.stop_mission_button));
+        btnPauseResumeMission.setEnabled(true);
+        btnPauseResumeMission.setText(getString(R.string.pause_mission_button));
+        tvLog.setText(String.format(Locale.US, "VS mission started from WP %d", missionWaypoints.get(currentWaypointCursor).getWaypointIndex()));
+        vsMissionHandler.removeCallbacks(virtualStickMissionLoop);
+        vsMissionHandler.post(virtualStickMissionLoop);
     }
 
     private void stopMission() {
-        WaypointMissionManager.getInstance().stopMission("mission", new CommonCallbacks.CompletionCallback() {
-            @Override
-            public void onSuccess() {
-                Log.i(TAG, "stopMission - onClick - onSuccess");
-                isMissionStarted = false;
-                btnStartStopMission.setText(getString(R.string.start_mission_button));
-                btnStartStopMission.setEnabled(false);
-                btnPauseResumeMission.setEnabled(false);
-
-                startRTH();
-            }
-
-            @Override
-            public void onFailure(@NonNull IDJIError idjiError) {
-                Log.i(TAG, "startMission - onClick - onFailure: " + idjiError);
-            }
-        });
-    }
-
-    private void startRTH() {
-        KeyManager.getInstance().performAction(KeyTools.createKey(FlightControllerKey.KeyStartGoHome), new CommonCallbacks.CompletionCallbackWithParam<>() {
-            @Override
-            public void onSuccess(EmptyMsg emptyMsg) {
-                Log.i(TAG, "startRTH - onSuccess");
-            }
-
-            @Override
-            public void onFailure(@NonNull IDJIError idjiError) {
-                Log.i(TAG, "startRTH - onFailure: " + idjiError);
-            }
-        });
+        isMissionStarted = false;
+        isMissionPaused = false;
+        vsMissionHandler.removeCallbacks(virtualStickMissionLoop);
+        sendVirtualStickCommand(0.0, 0.0, droneHeading, 0.0);
+        btnStartStopMission.setText(getString(R.string.start_mission_button));
+        btnStartStopMission.setEnabled(isMissionLoaded);
+        btnPauseResumeMission.setEnabled(false);
+        btnPauseResumeMission.setText(getString(R.string.pause_mission_button));
+        tvLog.setText("VS mission stopped");
     }
 
     private void pauseMission() {
-        WaypointMissionManager.getInstance().pauseMission(new CommonCallbacks.CompletionCallback() {
-            @Override
-            public void onSuccess() {
-                Log.i(TAG, "pauseMission - onClick - onSuccess");
-                isMissionPaused = true;
-                btnPauseResumeMission.setEnabled(true);
-                btnPauseResumeMission.setText(getString(R.string.resume_mission_button));
-            }
-
-            @Override
-            public void onFailure(@NonNull IDJIError idjiError) {
-                Log.i(TAG, "pauseMission - onClick - onFailure: " + idjiError);
-            }
-        });
+        if (!isMissionStarted) {
+            return;
+        }
+        isMissionPaused = true;
+        vsMissionHandler.removeCallbacks(virtualStickMissionLoop);
+        sendVirtualStickCommand(0.0, 0.0, droneHeading, 0.0);
+        btnPauseResumeMission.setEnabled(true);
+        btnPauseResumeMission.setText(getString(R.string.resume_mission_button));
+        tvLog.setText("VS mission paused");
     }
 
     private void resumeMission() {
-        WaypointMissionManager.getInstance().resumeMission(new CommonCallbacks.CompletionCallback() {
-            @Override
-            public void onSuccess() {
-                Log.i(TAG, "resumeMission - onClick - onSuccess");
-                isMissionPaused = false;
-                btnPauseResumeMission.setEnabled(true);
-                btnPauseResumeMission.setText(getString(R.string.pause_mission_button));
+        if (!isMissionStarted) {
+            return;
+        }
+        isMissionPaused = false;
+        btnPauseResumeMission.setEnabled(true);
+        btnPauseResumeMission.setText(getString(R.string.pause_mission_button));
+        tvLog.setText("VS mission resumed");
+        vsMissionHandler.removeCallbacks(virtualStickMissionLoop);
+        vsMissionHandler.post(virtualStickMissionLoop);
+    }
+
+    private void runVirtualStickMissionTick() {
+        if (!isMissionStarted || isMissionPaused || currentWaypointCursor >= missionWaypoints.size()) {
+            return;
+        }
+
+        WaylineExecuteWaypoint targetWp = missionWaypoints.get(currentWaypointCursor);
+        float[] distanceResult = new float[1];
+        Location.distanceBetween(
+                droneCurrentLocation.getLatitude(), droneCurrentLocation.getLongitude(),
+                targetWp.getLocation().getLatitude(), targetWp.getLocation().getLongitude(),
+                distanceResult
+        );
+        double distanceMeters = distanceResult[0];
+        double targetAltitude = targetWp.getExecuteHeight() != null ? targetWp.getExecuteHeight() : droneAltitude;
+        double altitudeError = targetAltitude - droneAltitude;
+
+        if (distanceMeters <= WP_REACHED_DISTANCE_METERS && Math.abs(altitudeError) <= WP_REACHED_ALTITUDE_METERS) {
+            onWaypointReached(targetWp);
+            return;
+        }
+
+        double bearing = calculateBearing(
+                droneCurrentLocation.getLatitude(),
+                droneCurrentLocation.getLongitude(),
+                targetWp.getLocation().getLatitude(),
+                targetWp.getLocation().getLongitude()
+        );
+        double cruiseSpeed = Math.min(5.0, Math.max(1.0, distanceMeters * 0.35));
+        // Hold position until near target altitude, then start horizontal movement.
+        if (droneAltitude < (targetAltitude - 0.5)) {
+            cruiseSpeed = 0.0;
+        }
+        double[] groundVelocity = calculateGroundVelocity(bearing, cruiseSpeed);
+        // Baseline behavior: during the 200m north leg do not command descent.
+        // This avoids accidental landing when simulator altitude sign/source is noisy.
+        double verticalVelocity = clamp(Math.max(0.0, altitudeError * 0.8), 0.0, 2.0);
+        if (droneAltitude < 2.0) {
+            verticalVelocity = Math.max(verticalVelocity, 0.8);
+        }
+        // In GROUND frame: pitch=North speed, roll=East speed.
+        sendVirtualStickCommand(groundVelocity[0], groundVelocity[1], droneHeading, verticalVelocity);
+        tvLog.setText(String.format(Locale.US, "VS WP %d dist %.1fm altErr %.1fm", targetWp.getWaypointIndex(), distanceMeters, altitudeError));
+    }
+
+    private void onWaypointReached(@NonNull WaylineExecuteWaypoint waypoint) {
+        int waypointIndex = waypoint.getWaypointIndex() != null ? waypoint.getWaypointIndex() : currentWaypointCursor;
+        triggerWaypointActions(waypointIndex);
+
+        currentWaypointCursor++;
+        if (currentWaypointCursor >= missionWaypoints.size()) {
+            isMissionStarted = false;
+            isMissionPaused = false;
+            vsMissionHandler.removeCallbacks(virtualStickMissionLoop);
+            sendVirtualStickCommand(0.0, 0.0, droneHeading, 0.0);
+            btnStartStopMission.setText(getString(R.string.start_mission_button));
+            btnPauseResumeMission.setEnabled(false);
+            btnPauseResumeMission.setText(getString(R.string.pause_mission_button));
+            tvLog.setText("VS mission complete");
+            return;
+        }
+
+        tvLog.setText(String.format(Locale.US, "Reached WP %d -> next %d",
+                waypointIndex,
+                missionWaypoints.get(currentWaypointCursor).getWaypointIndex()));
+    }
+
+    private void triggerWaypointActions(int waypointIndex) {
+        for (WaylineActionGroup actionGroup : missionActionGroups) {
+            if (actionGroup == null) {
+                continue;
+            }
+            Integer groupId = actionGroup.getGroupId();
+            if (groupId == null) {
+                continue;
+            }
+            if (executedActionGroupIds.contains(groupId)) {
+                continue;
+            }
+            Integer start = actionGroup.getStartIndex();
+            Integer end = actionGroup.getEndIndex();
+            if (start == null || end == null || waypointIndex < start || waypointIndex > end) {
+                continue;
             }
 
-            @Override
-            public void onFailure(@NonNull IDJIError idjiError) {
-                Log.i(TAG, "resumeMission - onClick - onFailure: " + idjiError);
+            executedActionGroupIds.add(groupId);
+            List<WaylineActionInfo> actions = actionGroup.getActions();
+            if (actions == null || actions.isEmpty()) {
+                Log.i(TAG, "WP " + waypointIndex + " actionGroup " + groupId + " has no actions");
+                continue;
             }
-        });
+            for (int i = 0; i < actions.size(); i++) {
+                WaylineActionInfo action = actions.get(i);
+                Log.i(TAG, "WP " + waypointIndex + " actionGroup " + groupId + " action " + i + ": " + describeAction(action));
+            }
+        }
+    }
+
+    private String describeAction(@Nullable WaylineActionInfo actionInfo) {
+        if (actionInfo == null || actionInfo.getActionType() == null) {
+            return "UNKNOWN ACTION";
+        }
+        String actionType = actionInfo.getActionType().toString();
+        try {
+            switch (actionType) {
+                case "ROTATE_YAW":
+                    return actionType + " heading=" + actionInfo.getAircraftRotateYawParam().getHeading();
+                case "HOVER":
+                    return actionType + " time=" + actionInfo.getAircraftHoverParam().getHoverTime();
+                case "GIMBAL_ROTATE":
+                    return actionType + " pitch=" + actionInfo.getGimbalRotateParam().getPitch()
+                            + " yaw=" + actionInfo.getGimbalRotateParam().getYaw();
+                case "FOCUS":
+                    return actionType + " x=" + actionInfo.getFocusParam().getFocus_x()
+                            + " y=" + actionInfo.getFocusParam().getFocus_y();
+                case "ZOOM":
+                    return actionType + " focal=" + actionInfo.getZoomParam().getFocalLength();
+                case "TAKE_PHOTO":
+                    return actionType + " suffix=" + actionInfo.getTakePhotoParam().getFileSuffix();
+                default:
+                    return actionType;
+            }
+        } catch (Exception ignored) {
+            return actionType;
+        }
+    }
+
+    private double[] calculateGroundVelocity(double targetHeadingDeg, double speedMetersPerSecond) {
+        double targetRad = Math.toRadians(targetHeadingDeg);
+        double northVelocity = speedMetersPerSecond * Math.cos(targetRad);
+        double eastVelocity = speedMetersPerSecond * Math.sin(targetRad);
+        return new double[]{clamp(northVelocity, -6.0, 6.0), clamp(eastVelocity, -6.0, 6.0)};
+    }
+
+    private void sendVirtualStickCommand(double pitch, double roll, double yawAngleDeg, double verticalVelocity) {
+        VirtualStickFlightControlParam param = new VirtualStickFlightControlParam();
+        param.setRollPitchCoordinateSystem(FlightCoordinateSystem.GROUND);
+        param.setRollPitchControlMode(RollPitchControlMode.VELOCITY);
+        param.setYawControlMode(YawControlMode.ANGLE);
+        param.setVerticalControlMode(VerticalControlMode.VELOCITY);
+        // In GROUND frame on this target, axes are swapped vs expected:
+        // roll drives North/South, pitch drives East/West.
+        param.setPitch(clamp(roll, -6.0, 6.0));
+        param.setRoll(clamp(pitch, -6.0, 6.0));
+        param.setYaw(yawAngleDeg);
+        param.setVerticalThrottle(clamp(verticalVelocity, -2.0, 2.0));
+        VirtualStickManager.getInstance().sendVirtualStickAdvancedParam(param);
+    }
+
+    private static double calculateBearing(double lat1, double lon1, double lat2, double lon2) {
+        double startLat = Math.toRadians(lat1);
+        double startLng = Math.toRadians(lon1);
+        double endLat = Math.toRadians(lat2);
+        double endLng = Math.toRadians(lon2);
+        double y = Math.sin(endLng - startLng) * Math.cos(endLat);
+        double x = Math.cos(startLat) * Math.sin(endLat) - Math.sin(startLat) * Math.cos(endLat) * Math.cos(endLng - startLng);
+        return (Math.toDegrees(Math.atan2(y, x)) + 360.0) % 360.0;
+    }
+
+    private static double clamp(double value, double min, double max) {
+        return Math.max(min, Math.min(max, value));
     }
 
     private void setHome() {
@@ -860,6 +1124,7 @@ public class MainActivity extends AppCompatActivity {
             @Override
             public void onSuccess() {
                 Log.i(TAG, "enableSimulator - onSuccess");
+                isSimulatorEnabled = true;
 
                 tvSimulator.setText(getString(R.string.true_output));
                 tvHome.setText(getString(R.string.true_output));
@@ -867,7 +1132,13 @@ public class MainActivity extends AppCompatActivity {
 
                 updateDroneHomeAndCurrentLocation();
 
-                SimulatorManager.getInstance().addSimulatorStateListener(state -> updateDroneHomeAndCurrentLocation());
+                SimulatorManager.getInstance().addSimulatorStateListener(state -> {
+                    if (state != null && state.getLocation() != null) {
+                        droneCurrentLocation.setLatitude(state.getLocation().getLatitude());
+                        droneCurrentLocation.setLongitude(state.getLocation().getLongitude());
+                    }
+                    updateDroneHomeAndCurrentLocation();
+                });
             }
 
             @Override
@@ -883,6 +1154,7 @@ public class MainActivity extends AppCompatActivity {
             @Override
             public void onSuccess() {
                 Log.i(TAG, "disableSimulator - onSuccess");
+                isSimulatorEnabled = false;
 
                 tvSimulator.setText(getString(R.string.false_output));
                 tvHome.setTextColor(Color.WHITE);
@@ -947,6 +1219,21 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
 
+        double homeLat = droneHomeLocation.getLatitude();
+        double homeLon = droneHomeLocation.getLongitude();
+        if (!checkGPSCoordinates(homeLat, homeLon)) {
+            homeLat = waypoints.get(0).getLocation().getLatitude();
+            homeLon = waypoints.get(0).getLocation().getLongitude();
+        }
+
+        renderMissionWaypointsOnMap(waypoints, homeLat, homeLon);
+    }
+
+    private void renderMissionWaypointsOnMap(@NonNull List<WaylineExecuteWaypoint> waypoints, double homeLat, double homeLon) {
+        if (mapStyle == null || waypoints.isEmpty()) {
+            return;
+        }
+
         // Remove existing layers and sources to avoid duplication
         if (mapStyle.getLayer("mission-home-layer") != null) {
             mapStyle.removeLayer("mission-home-layer");
@@ -981,7 +1268,7 @@ public class MainActivity extends AppCompatActivity {
 
         // Add magenta line from home to the first waypoint
         List<Point> homeToFirstWaypointPoints = new ArrayList<>();
-        homeToFirstWaypointPoints.add(Point.fromLngLat(droneHomeLocation.getLongitude(), droneHomeLocation.getLatitude()));
+        homeToFirstWaypointPoints.add(Point.fromLngLat(homeLon, homeLat));
         WaylineExecuteWaypoint firstWaypoint = waypoints.get(0);  // Get the first waypoint
         homeToFirstWaypointPoints.add(Point.fromLngLat(firstWaypoint.getLocation().getLongitude(), firstWaypoint.getLocation().getLatitude()));
 
@@ -1000,7 +1287,7 @@ public class MainActivity extends AppCompatActivity {
         List<Point> lastWaypointToHomePoints = new ArrayList<>();
         WaylineExecuteWaypoint lastWaypoint = waypoints.get(waypoints.size() - 1);  // Get the last waypoint
         lastWaypointToHomePoints.add(Point.fromLngLat(lastWaypoint.getLocation().getLongitude(), lastWaypoint.getLocation().getLatitude()));
-        lastWaypointToHomePoints.add(Point.fromLngLat(droneHomeLocation.getLongitude(), droneHomeLocation.getLatitude()));
+        lastWaypointToHomePoints.add(Point.fromLngLat(homeLon, homeLat));
 
         GeoJsonSource lastWaypointToHomeSource = new GeoJsonSource("lastwaypoint-to-home-source", LineString.fromLngLats(lastWaypointToHomePoints));
         mapStyle.addSource(lastWaypointToHomeSource);
@@ -1041,7 +1328,7 @@ public class MainActivity extends AppCompatActivity {
         mapStyle.addImage("home-marker-icon", BitmapFactory.decodeResource(getResources(), R.drawable.home_location));
         GeoJsonSource homeMarkerSource = new GeoJsonSource("mission-home-source");
         List<Feature> homeFeatures = new ArrayList<>();
-        homeFeatures.add(Feature.fromGeometry(Point.fromLngLat(droneHomeLocation.getLongitude(), droneHomeLocation.getLatitude())));
+        homeFeatures.add(Feature.fromGeometry(Point.fromLngLat(homeLon, homeLat)));
         homeMarkerSource.setGeoJson(FeatureCollection.fromFeatures(homeFeatures));
         mapStyle.addSource(homeMarkerSource);
 
@@ -1080,23 +1367,25 @@ public class MainActivity extends AppCompatActivity {
     private void updateDroneHomeAndCurrentLocation() {
         if (mapStyle != null) {
             // Update home location marker (no rotation)
-            Bitmap homeIconBitmap = BitmapFactory.decodeResource(getResources(), R.drawable.home_location);
-            if (mapStyle.getSource("live-home-source") != null) {
-                GeoJsonSource source = mapStyle.getSourceAs("live-home-source");
-                if (source != null) {
-                    source.setGeoJson(Point.fromLngLat(droneHomeLocation.getLongitude(), droneHomeLocation.getLatitude()));
+            if (checkGPSCoordinates(droneHomeLocation.getLatitude(), droneHomeLocation.getLongitude())) {
+                Bitmap homeIconBitmap = BitmapFactory.decodeResource(getResources(), R.drawable.home_location);
+                if (mapStyle.getSource("live-home-source") != null) {
+                    GeoJsonSource source = mapStyle.getSourceAs("live-home-source");
+                    if (source != null) {
+                        source.setGeoJson(Point.fromLngLat(droneHomeLocation.getLongitude(), droneHomeLocation.getLatitude()));
+                    }
+                } else {
+                    GeoJsonSource source = new GeoJsonSource("live-home-source", Point.fromLngLat(droneHomeLocation.getLongitude(), droneHomeLocation.getLatitude()));
+                    mapStyle.addSource(source);
+                    SymbolLayer layer = new SymbolLayer("live-home-layer", "live-home-source");
+                    layer.setProperties(
+                            iconImage("live-home-icon"),
+                            iconAllowOverlap(true),
+                            iconIgnorePlacement(true)
+                    );
+                    mapStyle.addLayer(layer);
+                    mapStyle.addImage("live-home-icon", homeIconBitmap);
                 }
-            } else {
-                GeoJsonSource source = new GeoJsonSource("live-home-source", Point.fromLngLat(droneHomeLocation.getLongitude(), droneHomeLocation.getLatitude()));
-                mapStyle.addSource(source);
-                SymbolLayer layer = new SymbolLayer("live-home-layer", "live-home-source");
-                layer.setProperties(
-                        iconImage("live-home-icon"),
-                        iconAllowOverlap(true),
-                        iconIgnorePlacement(true)
-                );
-                mapStyle.addLayer(layer);
-                mapStyle.addImage("live-home-icon", homeIconBitmap);
             }
 
             // Update current location marker (only if valid GPS coordinates) with rotation for the drone
@@ -1212,9 +1501,11 @@ public class MainActivity extends AppCompatActivity {
     private void listenerAircraftLocation3D() {
         KeyManager.getInstance().listen(KeyTools.createKey(FlightControllerKey.KeyAircraftLocation3D), this, (locationCoordinate3D, t1) -> {
             if (locationCoordinate3D != null) {
-//                Log.i(TAG, "droneCurrentLocation: " + locationCoordinate3D.getLatitude() + ", " + locationCoordinate3D.getLongitude());
-                droneCurrentLocation.setLatitude(locationCoordinate3D.getLatitude());
-                droneCurrentLocation.setLongitude(locationCoordinate3D.getLongitude());
+                if (checkGPSCoordinates(locationCoordinate3D.getLatitude(), locationCoordinate3D.getLongitude())) {
+                    droneCurrentLocation.setLatitude(locationCoordinate3D.getLatitude());
+                    droneCurrentLocation.setLongitude(locationCoordinate3D.getLongitude());
+                }
+                droneAltitude = locationCoordinate3D.getAltitude();
 
                 if (droneCurrentLocation.getLatitude() != 0 && droneHomeLocation.getLatitude() == 0) {
                     setHome();
@@ -1238,6 +1529,10 @@ public class MainActivity extends AppCompatActivity {
     private void listenerHomeLocation() {
         KeyManager.getInstance().listen(KeyTools.createKey(FlightControllerKey.KeyHomeLocation), this, (locationCoordinate2D, t1) -> {
             if (locationCoordinate2D != null) {
+                if (!checkGPSCoordinates(locationCoordinate2D.getLatitude(), locationCoordinate2D.getLongitude())) {
+                    Log.i(TAG, "Ignoring invalid home location: " + locationCoordinate2D.getLatitude() + ", " + locationCoordinate2D.getLongitude());
+                    return;
+                }
                 tvLog.setText(getString(R.string.home_point_updated, locationCoordinate2D.getLatitude(), locationCoordinate2D.getLongitude()));
 //                tvLog.setText("Home point updated! " + locationCoordinate2D.getLatitude() + ", " + locationCoordinate2D.getLongitude());
 
