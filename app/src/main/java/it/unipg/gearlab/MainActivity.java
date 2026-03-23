@@ -81,7 +81,6 @@ import dji.sdk.wpmz.value.mission.Wayline;
 import dji.sdk.wpmz.value.mission.WaylineActionGroup;
 import dji.sdk.wpmz.value.mission.WaylineActionInfo;
 import dji.sdk.wpmz.value.mission.WaylineExecuteWaypoint;
-import dji.sdk.wpmz.value.mission.WaylineLocationCoordinate2D;
 import dji.v5.common.callback.CommonCallbacks;
 import dji.v5.common.error.IDJIError;
 import dji.v5.common.register.DJISDKInitEvent;
@@ -513,9 +512,7 @@ public class MainActivity extends AppCompatActivity {
             if (loadedWayline.getWaypoints() != null) {
                 missionWaypoints.addAll(loadedWayline.getWaypoints());
             }
-            if (loadedWayline.getActionGroups() != null) {
-                missionActionGroups.addAll(loadedWayline.getActionGroups());
-            }
+            // Ignore all action groups: waypoint-only execution.
         } catch (Exception e) {
             Log.e(TAG, "Failed to parse KMZ waylines", e);
             tvLog.setText("KMZ parse error");
@@ -538,7 +535,7 @@ public class MainActivity extends AppCompatActivity {
         btnStartStopMission.setText(getString(R.string.start_mission_button));
         btnPauseResumeMission.setEnabled(false);
         btnPauseResumeMission.setText(getString(R.string.pause_mission_button));
-        tvLog.setText(String.format(Locale.US, "KMZ loaded: %d WP, %d action groups", missionWaypoints.size(), missionActionGroups.size()));
+        tvLog.setText(String.format(Locale.US, "KMZ loaded: %d waypoints (actions ignored)", missionWaypoints.size()));
     }
 
     private void logParsedWaypointsAndActions() {
@@ -737,64 +734,14 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void loadMission() {
-        double startLat;
-        double startLon;
-        if (checkGPSCoordinates(droneCurrentLocation.getLatitude(), droneCurrentLocation.getLongitude())) {
-            startLat = droneCurrentLocation.getLatitude();
-            startLon = droneCurrentLocation.getLongitude();
-        } else if (checkGPSCoordinates(droneHomeLocation.getLatitude(), droneHomeLocation.getLongitude())) {
-            startLat = droneHomeLocation.getLatitude();
-            startLon = droneHomeLocation.getLongitude();
-        } else {
+        if (!checkGPSCoordinates(droneHomeLocation.getLatitude(), droneHomeLocation.getLongitude())
+                && !checkGPSCoordinates(droneCurrentLocation.getLatitude(), droneCurrentLocation.getLongitude())) {
             tvLog.setText(getString(R.string.home_point_unknown));
             return;
         }
-
-        double northTargetLat = startLat + Math.toDegrees(50.0 / EARTH_RADIUS_METERS);
-        double northTargetLon = startLon;
-        double eastTargetLat = northTargetLat;
-        double eastTargetLon = northTargetLon + Math.toDegrees(50.0 / (EARTH_RADIUS_METERS * Math.cos(Math.toRadians(northTargetLat))));
-
-        missionWaypoints.clear();
-        missionActionGroups.clear();
-        executedActionGroupIds.clear();
-
-        WaylineExecuteWaypoint waypoint0 = new WaylineExecuteWaypoint();
-        waypoint0.setWaypointIndex(0);
-        WaylineLocationCoordinate2D location0 = new WaylineLocationCoordinate2D();
-        location0.setLatitude(northTargetLat);
-        location0.setLongitude(northTargetLon);
-        waypoint0.setLocation(location0);
-        waypoint0.setExecuteHeight(10.0);
-        missionWaypoints.add(waypoint0);
-
-        WaylineExecuteWaypoint waypoint1 = new WaylineExecuteWaypoint();
-        waypoint1.setWaypointIndex(1);
-        WaylineLocationCoordinate2D location1 = new WaylineLocationCoordinate2D();
-        location1.setLatitude(eastTargetLat);
-        location1.setLongitude(eastTargetLon);
-        waypoint1.setLocation(location1);
-        waypoint1.setExecuteHeight(10.0);
-        missionWaypoints.add(waypoint1);
-
-        renderMissionWaypointsOnMap(missionWaypoints, startLat, startLon);
-        logParsedWaypointsAndActions();
-
-        isMissionLoaded = true;
-        isMissionStarted = false;
-        isMissionPaused = false;
-        currentWaypointCursor = 0;
-        loadedWayline = null;
-        currentMissionPath = null;
-        btnStartStopMission.setEnabled(true);
-        btnStartStopMission.setText(getString(R.string.start_mission_button));
-        btnPauseResumeMission.setEnabled(false);
-        btnPauseResumeMission.setText(getString(R.string.pause_mission_button));
-        tvLog.setText(String.format(
-                Locale.US,
-                "Baseline mission loaded: WP0 +50m N (%.6f, %.6f), WP1 +50m E (%.6f, %.6f)",
-                northTargetLat, northTargetLon, eastTargetLat, eastTargetLon
-        ));
+        if (!loadBundledMission()) {
+            openFileChooser();
+        }
     }
 
     private void startMission() {
@@ -930,7 +877,8 @@ public class MainActivity extends AppCompatActivity {
             verticalVelocity = Math.max(verticalVelocity, 0.8);
         }
         // In GROUND frame: pitch=North speed, roll=East speed.
-        sendVirtualStickCommand(groundVelocity[0], groundVelocity[1], droneHeading, verticalVelocity);
+        // Keep aircraft nose/camera aligned with travel direction using yaw-rate control.
+        sendVirtualStickCommand(groundVelocity[0], groundVelocity[1], bearing, verticalVelocity);
         tvLog.setText(String.format(Locale.US, "VS WP %d dist %.1fm altErr %.1fm", targetWp.getWaypointIndex(), distanceMeters, altitudeError));
     }
 
@@ -1027,13 +975,15 @@ public class MainActivity extends AppCompatActivity {
         VirtualStickFlightControlParam param = new VirtualStickFlightControlParam();
         param.setRollPitchCoordinateSystem(FlightCoordinateSystem.GROUND);
         param.setRollPitchControlMode(RollPitchControlMode.VELOCITY);
-        param.setYawControlMode(YawControlMode.ANGLE);
+        param.setYawControlMode(YawControlMode.ANGULAR_VELOCITY);
         param.setVerticalControlMode(VerticalControlMode.VELOCITY);
         // In GROUND frame on this target, axes are swapped vs expected:
         // roll drives North/South, pitch drives East/West.
         param.setPitch(clamp(roll, -6.0, 6.0));
         param.setRoll(clamp(pitch, -6.0, 6.0));
-        param.setYaw(yawAngleDeg);
+        double yawError = normalizeAngleDegrees(yawAngleDeg - droneHeading);
+        double yawRate = clamp(yawError * 1.2, -45.0, 45.0);
+        param.setYaw(yawRate);
         param.setVerticalThrottle(clamp(verticalVelocity, -2.0, 2.0));
         VirtualStickManager.getInstance().sendVirtualStickAdvancedParam(param);
     }
@@ -1050,6 +1000,13 @@ public class MainActivity extends AppCompatActivity {
 
     private static double clamp(double value, double min, double max) {
         return Math.max(min, Math.min(max, value));
+    }
+
+    private static double normalizeAngleDegrees(double angleDeg) {
+        double out = angleDeg % 360.0;
+        if (out > 180.0) out -= 360.0;
+        if (out < -180.0) out += 360.0;
+        return out;
     }
 
     private void setHome() {
