@@ -58,10 +58,8 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.text.DecimalFormat;
 import java.util.ArrayList;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
-import java.util.Set;
 
 import dji.sdk.keyvalue.key.CameraKey;
 import dji.sdk.keyvalue.key.FlightControllerKey;
@@ -77,6 +75,11 @@ import dji.sdk.keyvalue.value.flightcontroller.RollPitchControlMode;
 import dji.sdk.keyvalue.value.flightcontroller.VerticalControlMode;
 import dji.sdk.keyvalue.value.flightcontroller.VirtualStickFlightControlParam;
 import dji.sdk.keyvalue.value.flightcontroller.YawControlMode;
+import dji.sdk.keyvalue.value.common.DoubleMinMax;
+import dji.sdk.keyvalue.value.gimbal.GimbalAngleRotation;
+import dji.sdk.keyvalue.value.gimbal.GimbalAngleRotationMode;
+import dji.sdk.keyvalue.value.gimbal.GimbalAttitudeRange;
+import dji.sdk.wpmz.value.mission.ActionGimbalRotateParam;
 import dji.sdk.wpmz.value.mission.Wayline;
 import dji.sdk.wpmz.value.mission.WaylineActionGroup;
 import dji.sdk.wpmz.value.mission.WaylineActionInfo;
@@ -106,8 +109,6 @@ public class MainActivity extends AppCompatActivity {
     private static final String FALLBACK_MAP_STYLE_URL = "https://demotiles.maplibre.org/style.json";
     private static final double EARTH_RADIUS_METERS = 6378137.0;
     private static final long VS_MISSION_TICK_MS = 200L;
-    private static final double WP_REACHED_DISTANCE_METERS = 1.5;
-    private static final double WP_REACHED_ALTITUDE_METERS = 1.0;
     private static final int PICK_KMZ_FILE_REQUEST = 1234;
     private static final int REQUEST_CODE_OPEN_DOCUMENT_TREE = 5678;
     private final DecimalFormat decimalFormat = new DecimalFormat("#.##");
@@ -133,8 +134,6 @@ public class MainActivity extends AppCompatActivity {
     private SurfaceView svCameraStream;
     private boolean isRightPanelOpen = true;
     private boolean isLeftPanelOpen = true;
-    private boolean isMissionStarted = false;
-    private boolean isMissionPaused = false;
     private boolean isVirtualStickEnabled = false;
     private boolean isSimulatorEnabled = false;
     private boolean mapFallbackApplied = false;
@@ -143,16 +142,19 @@ public class MainActivity extends AppCompatActivity {
     private String currentMissionPath;
     private final List<WaylineExecuteWaypoint> missionWaypoints = new ArrayList<>();
     private final List<WaylineActionGroup> missionActionGroups = new ArrayList<>();
-    private final Set<Integer> executedActionGroupIds = new HashSet<>();
+    private MissionPlanner missionPlanner;
     private final Handler vsMissionHandler = new Handler(Looper.getMainLooper());
-    private int currentWaypointCursor = 0;
     private boolean isMissionLoaded = false;
+    private boolean hasGimbalYawCapabilityInfo = false;
+    private boolean gimbalYawAdjustSupported = false;
+    @Nullable
+    private GimbalAttitudeRange gimbalAttitudeRange = null;
     private Wayline loadedWayline;
     private final Runnable virtualStickMissionLoop = new Runnable() {
         @Override
         public void run() {
             runVirtualStickMissionTick();
-            if (isMissionStarted && !isMissionPaused) {
+            if (missionPlanner != null && missionPlanner.isMissionStarted() && !missionPlanner.isMissionPaused()) {
                 vsMissionHandler.postDelayed(this, VS_MISSION_TICK_MS);
             }
         }
@@ -174,11 +176,46 @@ public class MainActivity extends AppCompatActivity {
 
         setContentView(R.layout.activity_main);
         initUI(savedInstanceState);
+        initMissionPlanner();
         initRGBCamera();
         registerApp();
 
         // Again!
         setAppStyle();
+    }
+
+    private void initMissionPlanner() {
+        missionPlanner = new MissionPlanner(new MissionPlanner.Callbacks() {
+            @Override
+            public void sendVirtualStickCommand(double pitch, double roll, double yawAngleDeg, double verticalVelocity) {
+                MainActivity.this.sendVirtualStickCommand(pitch, roll, yawAngleDeg, verticalVelocity);
+            }
+
+            @Override
+            public void executeGimbalRotate(@Nullable ActionGimbalRotateParam param) {
+                MainActivity.this.executeGimbalRotate(param);
+            }
+
+            @Override
+            public void onPlannerStatus(@NonNull String status) {
+                runOnUiThread(() -> tvLog.setText(status));
+            }
+
+            @Override
+            public void onPlannerLog(@NonNull String line) {
+                Log.i(TAG, line);
+            }
+
+            @Override
+            public void onMissionComplete() {
+                runOnUiThread(() -> {
+                    btnStartStopMission.setText(getString(R.string.start_mission_button));
+                    btnPauseResumeMission.setEnabled(false);
+                    btnPauseResumeMission.setText(getString(R.string.pause_mission_button));
+                    stopMissionLoopAndHoldPosition();
+                });
+            }
+        });
     }
 
     private void setAppStyle() {
@@ -369,7 +406,7 @@ public class MainActivity extends AppCompatActivity {
         });
 
         btnStartStopMission.setOnClickListener(view -> {
-            if (isMissionStarted) {
+            if (missionPlanner != null && missionPlanner.isMissionStarted()) {
                 Log.i(TAG, "stopMission - onClick");
                 stopMission();
             } else {
@@ -379,7 +416,7 @@ public class MainActivity extends AppCompatActivity {
         });
 
         btnPauseResumeMission.setOnClickListener(view -> {
-            if (isMissionPaused) {
+            if (missionPlanner != null && missionPlanner.isMissionPaused()) {
                 Log.i(TAG, "resumeMission - onClick");
                 resumeMission();
             } else {
@@ -507,12 +544,16 @@ public class MainActivity extends AppCompatActivity {
             loadedWayline = waylines.get(0);
             missionWaypoints.clear();
             missionActionGroups.clear();
-            executedActionGroupIds.clear();
 
             if (loadedWayline.getWaypoints() != null) {
                 missionWaypoints.addAll(loadedWayline.getWaypoints());
             }
-            // Ignore all action groups: waypoint-only execution.
+            if (loadedWayline.getActionGroups() != null) {
+                missionActionGroups.addAll(loadedWayline.getActionGroups());
+            }
+            if (missionPlanner != null) {
+                missionPlanner.setMissionData(missionWaypoints, missionActionGroups);
+            }
         } catch (Exception e) {
             Log.e(TAG, "Failed to parse KMZ waylines", e);
             tvLog.setText("KMZ parse error");
@@ -528,14 +569,14 @@ public class MainActivity extends AppCompatActivity {
         logParsedWaypointsAndActions();
 
         isMissionLoaded = true;
-        isMissionStarted = false;
-        isMissionPaused = false;
-        currentWaypointCursor = 0;
+        if (missionPlanner != null) {
+            missionPlanner.resetExecutionState();
+        }
         btnStartStopMission.setEnabled(true);
         btnStartStopMission.setText(getString(R.string.start_mission_button));
         btnPauseResumeMission.setEnabled(false);
         btnPauseResumeMission.setText(getString(R.string.pause_mission_button));
-        tvLog.setText(String.format(Locale.US, "KMZ loaded: %d waypoints (actions ignored)", missionWaypoints.size()));
+        tvLog.setText(String.format(Locale.US, "KMZ loaded: %d waypoints (actions: yaw/hover/gimbal)", missionWaypoints.size()));
     }
 
     private void logParsedWaypointsAndActions() {
@@ -570,7 +611,7 @@ public class MainActivity extends AppCompatActivity {
                 }
                 for (int i = 0; i < actions.size(); i++) {
                     Log.i(TAG, String.format(Locale.US, "  - group %s action %d: %s",
-                            String.valueOf(groupId), i, describeAction(actions.get(i))));
+                            String.valueOf(groupId), i, MissionPlanner.describeAction(actions.get(i))));
                 }
             }
             if (!hasActions) {
@@ -764,8 +805,6 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
 
-        executedActionGroupIds.clear();
-        currentWaypointCursor = 0;
         if (droneAltitude < 0.8) {
             tvLog.setText("VS mission: auto takeoff...");
             KeyManager.getInstance().performAction(
@@ -779,7 +818,6 @@ public class MainActivity extends AppCompatActivity {
                         @Override
                         public void onFailure(@NonNull IDJIError idjiError) {
                             Log.i(TAG, "startTakeoff - onFailure: " + idjiError);
-                            // Continue anyway in case simulator is already in flying state.
                             beginMissionLoop(0);
                         }
                     }
@@ -790,22 +828,24 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void beginMissionLoop(int startCursor) {
-        currentWaypointCursor = startCursor;
-        isMissionStarted = true;
-        isMissionPaused = false;
+        if (missionPlanner == null || missionWaypoints.isEmpty()) {
+            return;
+        }
+        missionPlanner.startFromWaypoint(startCursor);
         btnStartStopMission.setText(getString(R.string.stop_mission_button));
         btnPauseResumeMission.setEnabled(true);
         btnPauseResumeMission.setText(getString(R.string.pause_mission_button));
-        tvLog.setText(String.format(Locale.US, "VS mission started from WP %d", missionWaypoints.get(currentWaypointCursor).getWaypointIndex()));
+        int wpIndex = missionWaypoints.get(missionPlanner.getCurrentWaypointCursor()).getWaypointIndex();
+        tvLog.setText(String.format(Locale.US, "VS mission started from WP %d", wpIndex));
         vsMissionHandler.removeCallbacks(virtualStickMissionLoop);
         vsMissionHandler.post(virtualStickMissionLoop);
     }
 
     private void stopMission() {
-        isMissionStarted = false;
-        isMissionPaused = false;
-        vsMissionHandler.removeCallbacks(virtualStickMissionLoop);
-        sendVirtualStickCommand(0.0, 0.0, droneHeading, 0.0);
+        if (missionPlanner != null) {
+            missionPlanner.stop();
+        }
+        stopMissionLoopAndHoldPosition();
         btnStartStopMission.setText(getString(R.string.start_mission_button));
         btnStartStopMission.setEnabled(isMissionLoaded);
         btnPauseResumeMission.setEnabled(false);
@@ -814,22 +854,21 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void pauseMission() {
-        if (!isMissionStarted) {
+        if (missionPlanner == null || !missionPlanner.isMissionStarted()) {
             return;
         }
-        isMissionPaused = true;
-        vsMissionHandler.removeCallbacks(virtualStickMissionLoop);
-        sendVirtualStickCommand(0.0, 0.0, droneHeading, 0.0);
+        missionPlanner.pause();
+        stopMissionLoopAndHoldPosition();
         btnPauseResumeMission.setEnabled(true);
         btnPauseResumeMission.setText(getString(R.string.resume_mission_button));
         tvLog.setText("VS mission paused");
     }
 
     private void resumeMission() {
-        if (!isMissionStarted) {
+        if (missionPlanner == null || !missionPlanner.isMissionStarted()) {
             return;
         }
-        isMissionPaused = false;
+        missionPlanner.resume();
         btnPauseResumeMission.setEnabled(true);
         btnPauseResumeMission.setText(getString(R.string.pause_mission_button));
         tvLog.setText("VS mission resumed");
@@ -838,137 +877,103 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void runVirtualStickMissionTick() {
-        if (!isMissionStarted || isMissionPaused || currentWaypointCursor >= missionWaypoints.size()) {
+        if (missionPlanner == null) {
+            return;
+        }
+        missionPlanner.tick(droneCurrentLocation, droneAltitude, droneHeading);
+    }
+
+    private void stopMissionLoopAndHoldPosition() {
+        vsMissionHandler.removeCallbacks(virtualStickMissionLoop);
+        sendVirtualStickCommand(0.0, 0.0, droneHeading, 0.0);
+    }
+
+    private void executeGimbalRotate(@Nullable ActionGimbalRotateParam param) {
+        if (param == null) {
+            return;
+        }
+        boolean enablePitch = Boolean.TRUE.equals(param.getEnablePitch());
+        boolean enableRoll = Boolean.TRUE.equals(param.getEnableRoll());
+        boolean enableYaw = Boolean.TRUE.equals(param.getEnableYaw());
+        double pitch = param.getPitch() != null ? param.getPitch() : 0.0;
+        double roll = param.getRoll() != null ? param.getRoll() : 0.0;
+        double yaw = param.getYaw() != null ? param.getYaw() : 0.0;
+
+        if (enableYaw && hasGimbalYawCapabilityInfo && !gimbalYawAdjustSupported) {
+            Log.w(TAG, "Skipping gimbal yaw action: yaw adjust not supported on this product.");
+            enableYaw = false;
+        }
+
+        DoubleMinMax pitchRange = gimbalAttitudeRange != null ? gimbalAttitudeRange.getPitch() : null;
+        DoubleMinMax rollRange = gimbalAttitudeRange != null ? gimbalAttitudeRange.getRoll() : null;
+        DoubleMinMax yawRange = gimbalAttitudeRange != null ? gimbalAttitudeRange.getYaw() : null;
+
+        if (enablePitch) {
+            double clamped = clampToRange(pitch, pitchRange);
+            if (clamped != pitch) {
+                Log.w(TAG, String.format(Locale.US, "Clamp gimbal pitch %.1f -> %.1f", pitch, clamped));
+            }
+            pitch = clamped;
+        }
+        if (enableRoll) {
+            double clamped = clampToRange(roll, rollRange);
+            if (clamped != roll) {
+                Log.w(TAG, String.format(Locale.US, "Clamp gimbal roll %.1f -> %.1f", roll, clamped));
+            }
+            roll = clamped;
+        }
+        if (enableYaw) {
+            double clamped = clampToRange(yaw, yawRange);
+            if (clamped != yaw) {
+                Log.w(TAG, String.format(Locale.US, "Clamp gimbal yaw %.1f -> %.1f", yaw, clamped));
+            }
+            yaw = clamped;
+        }
+
+        if (!enablePitch && !enableRoll && !enableYaw) {
+            Log.w(TAG, "Skipping gimbal action: no enabled axis after capability/range filtering.");
             return;
         }
 
-        WaylineExecuteWaypoint targetWp = missionWaypoints.get(currentWaypointCursor);
-        float[] distanceResult = new float[1];
-        Location.distanceBetween(
-                droneCurrentLocation.getLatitude(), droneCurrentLocation.getLongitude(),
-                targetWp.getLocation().getLatitude(), targetWp.getLocation().getLongitude(),
-                distanceResult
+        GimbalAngleRotation rotation = new GimbalAngleRotation();
+        String rotateMode = param.getRotateMode() != null ? param.getRotateMode().toString() : "";
+        rotation.setMode(rotateMode.contains("RELATIVE")
+                ? GimbalAngleRotationMode.RELATIVE_ANGLE
+                : GimbalAngleRotationMode.ABSOLUTE_ANGLE);
+        rotation.setPitch(pitch);
+        rotation.setRoll(roll);
+        rotation.setYaw(yaw);
+        rotation.setPitchIgnored(!enablePitch);
+        rotation.setRollIgnored(!enableRoll);
+        rotation.setYawIgnored(!enableYaw);
+        rotation.setDuration(Boolean.TRUE.equals(param.getEnableRotateTime()) && param.getRotateTime() != null
+                ? param.getRotateTime()
+                : 1.0);
+        rotation.setJointReferenceUsed(false);
+        rotation.setTimeout(3);
+
+        KeyManager.getInstance().performAction(
+                KeyTools.createKey(GimbalKey.KeyRotateByAngle, ComponentIndexType.LEFT_OR_MAIN),
+                rotation,
+                new CommonCallbacks.CompletionCallbackWithParam<EmptyMsg>() {
+                    @Override
+                    public void onSuccess(EmptyMsg emptyMsg) {
+                        Log.i(TAG, "GIMBAL_ROTATE onSuccess");
+                    }
+
+                    @Override
+                    public void onFailure(@NonNull IDJIError idjiError) {
+                        Log.e(TAG, "GIMBAL_ROTATE onFailure: " + idjiError);
+                    }
+                }
         );
-        double distanceMeters = distanceResult[0];
-        double targetAltitude = targetWp.getExecuteHeight() != null ? targetWp.getExecuteHeight() : droneAltitude;
-        double altitudeError = targetAltitude - droneAltitude;
-
-        if (distanceMeters <= WP_REACHED_DISTANCE_METERS && Math.abs(altitudeError) <= WP_REACHED_ALTITUDE_METERS) {
-            onWaypointReached(targetWp);
-            return;
-        }
-
-        double bearing = calculateBearing(
-                droneCurrentLocation.getLatitude(),
-                droneCurrentLocation.getLongitude(),
-                targetWp.getLocation().getLatitude(),
-                targetWp.getLocation().getLongitude()
-        );
-        double cruiseSpeed = Math.min(5.0, Math.max(1.0, distanceMeters * 0.35));
-        // Hold position until near target altitude, then start horizontal movement.
-        if (droneAltitude < (targetAltitude - 0.5)) {
-            cruiseSpeed = 0.0;
-        }
-        double[] groundVelocity = calculateGroundVelocity(bearing, cruiseSpeed);
-        // Baseline behavior: during the 200m north leg do not command descent.
-        // This avoids accidental landing when simulator altitude sign/source is noisy.
-        double verticalVelocity = clamp(Math.max(0.0, altitudeError * 0.8), 0.0, 2.0);
-        if (droneAltitude < 2.0) {
-            verticalVelocity = Math.max(verticalVelocity, 0.8);
-        }
-        // In GROUND frame: pitch=North speed, roll=East speed.
-        // Keep aircraft nose/camera aligned with travel direction using yaw-rate control.
-        sendVirtualStickCommand(groundVelocity[0], groundVelocity[1], bearing, verticalVelocity);
-        tvLog.setText(String.format(Locale.US, "VS WP %d dist %.1fm altErr %.1fm", targetWp.getWaypointIndex(), distanceMeters, altitudeError));
     }
 
-    private void onWaypointReached(@NonNull WaylineExecuteWaypoint waypoint) {
-        int waypointIndex = waypoint.getWaypointIndex() != null ? waypoint.getWaypointIndex() : currentWaypointCursor;
-        triggerWaypointActions(waypointIndex);
-
-        currentWaypointCursor++;
-        if (currentWaypointCursor >= missionWaypoints.size()) {
-            isMissionStarted = false;
-            isMissionPaused = false;
-            vsMissionHandler.removeCallbacks(virtualStickMissionLoop);
-            sendVirtualStickCommand(0.0, 0.0, droneHeading, 0.0);
-            btnStartStopMission.setText(getString(R.string.start_mission_button));
-            btnPauseResumeMission.setEnabled(false);
-            btnPauseResumeMission.setText(getString(R.string.pause_mission_button));
-            tvLog.setText("VS mission complete");
-            return;
+    private static double clampToRange(double value, @Nullable DoubleMinMax range) {
+        if (range == null || range.getMin() == null || range.getMax() == null) {
+            return value;
         }
-
-        tvLog.setText(String.format(Locale.US, "Reached WP %d -> next %d",
-                waypointIndex,
-                missionWaypoints.get(currentWaypointCursor).getWaypointIndex()));
-    }
-
-    private void triggerWaypointActions(int waypointIndex) {
-        for (WaylineActionGroup actionGroup : missionActionGroups) {
-            if (actionGroup == null) {
-                continue;
-            }
-            Integer groupId = actionGroup.getGroupId();
-            if (groupId == null) {
-                continue;
-            }
-            if (executedActionGroupIds.contains(groupId)) {
-                continue;
-            }
-            Integer start = actionGroup.getStartIndex();
-            Integer end = actionGroup.getEndIndex();
-            if (start == null || end == null || waypointIndex < start || waypointIndex > end) {
-                continue;
-            }
-
-            executedActionGroupIds.add(groupId);
-            List<WaylineActionInfo> actions = actionGroup.getActions();
-            if (actions == null || actions.isEmpty()) {
-                Log.i(TAG, "WP " + waypointIndex + " actionGroup " + groupId + " has no actions");
-                continue;
-            }
-            for (int i = 0; i < actions.size(); i++) {
-                WaylineActionInfo action = actions.get(i);
-                Log.i(TAG, "WP " + waypointIndex + " actionGroup " + groupId + " action " + i + ": " + describeAction(action));
-            }
-        }
-    }
-
-    private String describeAction(@Nullable WaylineActionInfo actionInfo) {
-        if (actionInfo == null || actionInfo.getActionType() == null) {
-            return "UNKNOWN ACTION";
-        }
-        String actionType = actionInfo.getActionType().toString();
-        try {
-            switch (actionType) {
-                case "ROTATE_YAW":
-                    return actionType + " heading=" + actionInfo.getAircraftRotateYawParam().getHeading();
-                case "HOVER":
-                    return actionType + " time=" + actionInfo.getAircraftHoverParam().getHoverTime();
-                case "GIMBAL_ROTATE":
-                    return actionType + " pitch=" + actionInfo.getGimbalRotateParam().getPitch()
-                            + " yaw=" + actionInfo.getGimbalRotateParam().getYaw();
-                case "FOCUS":
-                    return actionType + " x=" + actionInfo.getFocusParam().getFocus_x()
-                            + " y=" + actionInfo.getFocusParam().getFocus_y();
-                case "ZOOM":
-                    return actionType + " focal=" + actionInfo.getZoomParam().getFocalLength();
-                case "TAKE_PHOTO":
-                    return actionType + " suffix=" + actionInfo.getTakePhotoParam().getFileSuffix();
-                default:
-                    return actionType;
-            }
-        } catch (Exception ignored) {
-            return actionType;
-        }
-    }
-
-    private double[] calculateGroundVelocity(double targetHeadingDeg, double speedMetersPerSecond) {
-        double targetRad = Math.toRadians(targetHeadingDeg);
-        double northVelocity = speedMetersPerSecond * Math.cos(targetRad);
-        double eastVelocity = speedMetersPerSecond * Math.sin(targetRad);
-        return new double[]{clamp(northVelocity, -6.0, 6.0), clamp(eastVelocity, -6.0, 6.0)};
+        return clamp(value, range.getMin(), range.getMax());
     }
 
     private void sendVirtualStickCommand(double pitch, double roll, double yawAngleDeg, double verticalVelocity) {
@@ -977,8 +982,6 @@ public class MainActivity extends AppCompatActivity {
         param.setRollPitchControlMode(RollPitchControlMode.VELOCITY);
         param.setYawControlMode(YawControlMode.ANGULAR_VELOCITY);
         param.setVerticalControlMode(VerticalControlMode.VELOCITY);
-        // In GROUND frame on this target, axes are swapped vs expected:
-        // roll drives North/South, pitch drives East/West.
         param.setPitch(clamp(roll, -6.0, 6.0));
         param.setRoll(clamp(pitch, -6.0, 6.0));
         double yawError = normalizeAngleDegrees(yawAngleDeg - droneHeading);
@@ -986,16 +989,6 @@ public class MainActivity extends AppCompatActivity {
         param.setYaw(yawRate);
         param.setVerticalThrottle(clamp(verticalVelocity, -2.0, 2.0));
         VirtualStickManager.getInstance().sendVirtualStickAdvancedParam(param);
-    }
-
-    private static double calculateBearing(double lat1, double lon1, double lat2, double lon2) {
-        double startLat = Math.toRadians(lat1);
-        double startLng = Math.toRadians(lon1);
-        double endLat = Math.toRadians(lat2);
-        double endLng = Math.toRadians(lon2);
-        double y = Math.sin(endLng - startLng) * Math.cos(endLat);
-        double x = Math.cos(startLat) * Math.sin(endLat) - Math.sin(startLat) * Math.cos(endLat) * Math.cos(endLng - startLng);
-        return (Math.toDegrees(Math.atan2(y, x)) + 360.0) % 360.0;
     }
 
     private static double clamp(double value, double min, double max) {
@@ -1404,6 +1397,8 @@ public class MainActivity extends AppCompatActivity {
                 listenerHomeLocation();
                 listenerAircraftLocation3D();
                 listenerGimbalAttitude();
+                listenerGimbalYawCapability();
+                listenerGimbalAttitudeRange();
                 listenerAircraftVelocity();
             }
 
@@ -1453,6 +1448,37 @@ public class MainActivity extends AppCompatActivity {
 //                ));
 //            }
         });
+    }
+
+    private void listenerGimbalYawCapability() {
+        KeyManager.getInstance().listen(
+                KeyTools.createKey(GimbalKey.KeyYawAdjustSupported, ComponentIndexType.LEFT_OR_MAIN),
+                this,
+                (isSupported, t1) -> {
+                    if (isSupported == null) {
+                        return;
+                    }
+                    hasGimbalYawCapabilityInfo = true;
+                    gimbalYawAdjustSupported = isSupported;
+                    Log.i(TAG, "Gimbal yaw adjust supported: " + isSupported);
+                }
+        );
+    }
+
+    private void listenerGimbalAttitudeRange() {
+        KeyManager.getInstance().listen(
+                KeyTools.createKey(GimbalKey.KeyGimbalAttitudeRange, ComponentIndexType.LEFT_OR_MAIN),
+                this,
+                (range, t1) -> {
+                    if (range == null) {
+                        return;
+                    }
+                    gimbalAttitudeRange = range;
+                    Log.i(TAG, "Gimbal range pitch=" + String.valueOf(range.getPitch())
+                            + " roll=" + String.valueOf(range.getRoll())
+                            + " yaw=" + String.valueOf(range.getYaw()));
+                }
+        );
     }
 
     private void listenerAircraftLocation3D() {
