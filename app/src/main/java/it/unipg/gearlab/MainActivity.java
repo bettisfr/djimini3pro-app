@@ -7,15 +7,19 @@ import static org.maplibre.android.style.layers.PropertyFactory.iconImage;
 import static org.maplibre.android.style.layers.PropertyFactory.iconRotate;
 
 import android.animation.ObjectAnimator;
+import android.content.ContentValues;
 import android.content.Intent;
 import android.content.pm.ActivityInfo;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Color;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
+import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
+import android.provider.MediaStore;
 import android.util.Log;
 import android.view.SurfaceView;
 import android.view.View;
@@ -26,7 +30,6 @@ import android.widget.TextView;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.appcompat.app.AppCompatActivity;
-import androidx.documentfile.provider.DocumentFile;
 
 import com.google.android.material.switchmaterial.SwitchMaterial;
 
@@ -48,8 +51,10 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.text.DecimalFormat;
 import java.util.ArrayList;
+import java.util.Calendar;
 import java.util.List;
 import java.util.Locale;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import dji.sdk.keyvalue.key.CameraKey;
 import dji.sdk.keyvalue.key.FlightControllerKey;
@@ -69,6 +74,7 @@ import dji.sdk.keyvalue.value.gimbal.GimbalAngleRotation;
 import dji.sdk.keyvalue.value.gimbal.GimbalAngleRotationMode;
 import dji.sdk.keyvalue.value.gimbal.GimbalAttitudeRange;
 import dji.sdk.wpmz.value.mission.ActionGimbalRotateParam;
+import dji.sdk.wpmz.value.mission.ActionTakePhotoParam;
 import dji.sdk.wpmz.value.mission.WaylineActionGroup;
 import dji.sdk.wpmz.value.mission.WaylineActionInfo;
 import dji.sdk.wpmz.value.mission.WaylineExecuteWaypoint;
@@ -98,7 +104,6 @@ public class MainActivity extends AppCompatActivity {
     private static final double EARTH_RADIUS_METERS = 6378137.0;
     private static final long VS_MISSION_TICK_MS = 200L;
     private static final int PICK_KMZ_FILE_REQUEST = 1234;
-    private static final int REQUEST_CODE_OPEN_DOCUMENT_TREE = 5678;
     private final DecimalFormat decimalFormat = new DecimalFormat("#.##");
     private final DecimalFormat integerFormat = new DecimalFormat("#");
     private final LocationCoordinate2D droneHomeLocation = new LocationCoordinate2D(0., 0.);
@@ -128,6 +133,7 @@ public class MainActivity extends AppCompatActivity {
     private double droneHeading;
     private double droneAltitude;
     private String currentMissionPath;
+    private long missionStartTimestampMs = 0L;
     private final List<WaylineExecuteWaypoint> missionWaypoints = new ArrayList<>();
     private final List<WaylineActionGroup> missionActionGroups = new ArrayList<>();
     private MissionPlanner missionPlanner;
@@ -145,6 +151,18 @@ public class MainActivity extends AppCompatActivity {
             }
         }
     };
+
+    private static final class DownloadTarget {
+        @Nullable
+        final Uri uri;
+        @NonNull
+        final OutputStream outputStream;
+
+        private DownloadTarget(@Nullable Uri uri, @NonNull OutputStream outputStream) {
+            this.uri = uri;
+            this.outputStream = outputStream;
+        }
+    }
 
     public static boolean checkGPSCoordinates(double latitude, double longitude) {
         return (latitude > -90 && latitude < 90 && longitude > -180 && longitude < 180) && (latitude != 0f && longitude != 0f);
@@ -189,6 +207,13 @@ public class MainActivity extends AppCompatActivity {
             }
 
             @Override
+            public void executeTakePhoto(@Nullable ActionTakePhotoParam param) {
+                if (droneCommander != null) {
+                    droneCommander.executeTakePhoto(param);
+                }
+            }
+
+            @Override
             public void onPlannerStatus(@NonNull String status) {
                 runOnUiThread(() -> tvLog.setText(status));
             }
@@ -204,7 +229,8 @@ public class MainActivity extends AppCompatActivity {
                     btnStartStopMission.setText(getString(R.string.start_mission_button));
                     btnPauseResumeMission.setEnabled(false);
                     btnPauseResumeMission.setText(getString(R.string.pause_mission_button));
-                    stopMissionLoopAndHoldPosition();
+                    stopMissionLoop();
+                    triggerMissionRTH();
                 });
             }
         });
@@ -291,8 +317,8 @@ public class MainActivity extends AppCompatActivity {
 
     public void initUI(@Nullable Bundle savedInstanceState) {
         SwitchMaterial switchSimulator = findViewById(R.id.switch_simulator);
-        SwitchMaterial switchRTK = findViewById(R.id.switch_rtk);
-        Button btnPullMedia = findViewById(R.id.button_pull_media);
+        SwitchMaterial switchVirtualStick = findViewById(R.id.switch_virtual_stick);
+        Button btnForceRth = findViewById(R.id.button_force_rth);
         Button btnLoadMission = findViewById(R.id.button_load_mission);
         btnStartStopMission = findViewById(R.id.button_start_stop_mission);
         btnPauseResumeMission = findViewById(R.id.button_pause_resume_mission);
@@ -378,7 +404,7 @@ public class MainActivity extends AppCompatActivity {
             }
         });
 
-        switchRTK.setOnCheckedChangeListener((buttonView, isChecked) -> {
+        switchVirtualStick.setOnCheckedChangeListener((buttonView, isChecked) -> {
             if (isChecked) {
                 Log.i(TAG, "enableVirtualStick");
                 enableVirtualStick();
@@ -388,9 +414,9 @@ public class MainActivity extends AppCompatActivity {
             }
         });
 
-        btnPullMedia.setOnClickListener(view -> {
-            Log.i(TAG, "pullMedia");
-            pullMedia();
+        btnForceRth.setOnClickListener(view -> {
+            Log.i(TAG, "forceRTH");
+            forceRTH();
         });
 
         btnLoadMission.setOnClickListener(view -> {
@@ -498,11 +524,51 @@ public class MainActivity extends AppCompatActivity {
 
 
     private void pullMedia() {
-        tvLog.setText("Start pulling files from H20");
+        if (missionStartTimestampMs <= 0L) {
+            tvLog.setText("Pulling all media to Downloads...");
+        } else {
+            tvLog.setText("Pulling mission media to Downloads...");
+        }
+        pullMediaToDownloads();
+    }
 
-        // Select a destination folder here
-        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
-        startActivityForResult(intent, REQUEST_CODE_OPEN_DOCUMENT_TREE);
+    private void forceRTH() {
+        if (missionPlanner != null && missionPlanner.isMissionStarted()) {
+            missionPlanner.stop();
+            stopMissionLoop();
+        }
+        KeyManager.getInstance().performAction(
+                KeyTools.createKey(FlightControllerKey.KeyStartGoHome),
+                new CommonCallbacks.CompletionCallbackWithParam<EmptyMsg>() {
+                    @Override
+                    public void onSuccess(EmptyMsg emptyMsg) {
+                        runOnUiThread(() -> tvLog.setText("Manual RTH started"));
+                        Log.i(TAG, "Manual RTH start onSuccess");
+                    }
+
+                    @Override
+                    public void onFailure(@NonNull IDJIError idjiError) {
+                        Log.e(TAG, "Manual RTH start (KeyStartGoHome) onFailure: " + idjiError);
+                        KeyManager.getInstance().performAction(
+                                KeyTools.createKey(FlightControllerKey.KeyGoHomeConfirm),
+                                true,
+                                new CommonCallbacks.CompletionCallbackWithParam<EmptyMsg>() {
+                                    @Override
+                                    public void onSuccess(EmptyMsg emptyMsg) {
+                                        runOnUiThread(() -> tvLog.setText("Manual RTH started"));
+                                        Log.i(TAG, "Manual RTH start via confirm onSuccess");
+                                    }
+
+                                    @Override
+                                    public void onFailure(@NonNull IDJIError confirmError) {
+                                        runOnUiThread(() -> tvLog.setText("Manual RTH failed"));
+                                        Log.e(TAG, "Manual RTH start onFailure: " + confirmError);
+                                    }
+                                }
+                        );
+                    }
+                }
+        );
     }
 
     private void openFileChooser() {
@@ -610,7 +676,7 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    private void onActivityResultPullMedia(Uri treeUri) {
+    private void pullMediaToDownloads() {
         MediaFileListDataSource mediaSource = new MediaFileListDataSource.Builder().setIndexType(ComponentIndexType.LEFT_OR_MAIN).build();
         MediaManager.getInstance().setMediaFileDataSource(mediaSource);
 
@@ -621,108 +687,27 @@ public class MainActivity extends AppCompatActivity {
                 Log.i(TAG, "pullMediaFileListFromCamera - onSuccess");
 
                 MediaFileListData fileListData = MediaManager.getInstance().getMediaFileListData();
-                List<MediaFile> mediaFileList = fileListData.getData();
+                List<MediaFile> mediaFileList = fileListData != null ? fileListData.getData() : null;
+                if (mediaFileList == null) {
+                    runOnUiThread(() -> tvLog.setText("No media list available"));
+                    return;
+                }
 
-                int totalFiles = mediaFileList.size();
-                final int[] totalDone = {0};
+                List<MediaFile> filteredFiles = filterMediaFilesByMissionTimestamp(mediaFileList, missionStartTimestampMs);
+                final String targetFolder = buildMissionDownloadFolderName(missionStartTimestampMs);
+                int totalFiles = filteredFiles.size();
+                Log.i(TAG, String.format(Locale.US, "PULL media list size=%d filtered=%d missionStartMs=%d folder=%s",
+                        mediaFileList.size(), totalFiles, missionStartTimestampMs, targetFolder));
 
                 if (totalFiles == 0) {
                     runOnUiThread(() ->
-                            tvLog.setText("Nothing to pull from camera")
+                            tvLog.setText("No new media after mission start")
                     );
                     return;
                 }
 
-                DocumentFile pickedDir = DocumentFile.fromTreeUri(getApplicationContext(), treeUri);
-                if (pickedDir == null) {
-                    runOnUiThread(() -> tvLog.setText("Invalid destination folder"));
-                    return;
-                }
-
-                for (MediaFile mediaFile : mediaFileList) {
-                    String fileName = mediaFile.getFileName();
-                    DocumentFile newFile = pickedDir.createFile("application/octet-stream", fileName);
-
-                    if (newFile != null) {
-                        try {
-                            OutputStream outputStream = getContentResolver().openOutputStream(newFile.getUri());
-                            if (outputStream == null) {
-                                runOnUiThread(() ->
-                                        tvLog.setText("Failed to open output stream for " + fileName)
-                                );
-                                continue;
-                            }
-                            BufferedOutputStream bos = new BufferedOutputStream(outputStream);
-
-                            mediaFile.pullOriginalMediaFileFromCamera(0L, new MediaFileDownloadListener() {
-                                @Override
-                                public void onStart() {
-                                    runOnUiThread(() ->
-                                            Log.i(TAG, "Starting download for " + fileName)
-                                    );
-                                }
-
-                                @Override
-                                public void onProgress(long total, long current) {
-                                    int progress = (int) (100 * current / total);
-                                    runOnUiThread(() ->
-                                            Log.i(TAG, "Download progress for " + fileName + ": " + progress + "%")
-                                    );
-                                }
-
-                                @Override
-                                public void onRealtimeDataUpdate(byte[] data, long position) {
-                                    try {
-                                        bos.write(data);
-                                    } catch (IOException e) {
-                                        Log.e(TAG, "Write error for " + fileName + ": " + e.getMessage());
-                                    }
-                                }
-
-                                @Override
-                                public void onFinish() {
-                                    try {
-                                        bos.flush();
-                                        bos.close(); // Close the stream on finish
-                                        runOnUiThread(() -> {
-                                            totalDone[0]++;
-                                            tvLog.setText("Downloaded " + totalDone[0] + "/" + totalFiles + ": " + fileName);
-
-                                            if (totalDone[0] == totalFiles) {
-                                                tvLog.setText("All files downloaded.");
-                                                cleanUpMedia(mediaFileList);
-                                            }
-                                        });
-                                    } catch (IOException e) {
-                                        Log.e(TAG, "Error closing stream for " + fileName + ": " + e.getMessage());
-                                    }
-                                }
-
-                                @Override
-                                public void onFailure(IDJIError error) {
-                                    Log.e(TAG, "Download failed for " + fileName + ": " + error);
-                                    try {
-                                        bos.close(); // Ensure stream is closed on failure
-                                    } catch (IOException e) {
-                                        Log.e(TAG, "Error closing stream on failure for " + fileName + ": " + e.getMessage());
-                                    }
-
-                                    runOnUiThread(() ->
-                                            tvLog.setText("Failed to download " + fileName)
-                                    );
-                                }
-                            });
-
-                        } catch (IOException e) {
-                            Log.e(TAG, "Error creating file " + fileName + ": " + e.getMessage());
-                        }
-                    } else {
-                        Log.e(TAG, "Failed to create file: " + fileName);
-                        runOnUiThread(() ->
-                                tvLog.setText("Failed to create file: " + fileName)
-                        );
-                    }
-                }
+                runOnUiThread(() -> tvLog.setText(String.format(Locale.US, "Pull %d files -> Download/%s", totalFiles, targetFolder)));
+                downloadMediaFilesSequential(filteredFiles, 0, targetFolder, new AtomicInteger(0), new AtomicInteger(0));
             }
 
             @Override
@@ -732,6 +717,211 @@ public class MainActivity extends AppCompatActivity {
         });
     }
 
+    private void downloadMediaFilesSequential(@NonNull List<MediaFile> files,
+                                              int index,
+                                              @NonNull String targetFolder,
+                                              @NonNull AtomicInteger successCount,
+                                              @NonNull AtomicInteger failureCount) {
+        final int totalFiles = files.size();
+        if (index >= totalFiles) {
+            runOnUiThread(() -> tvLog.setText(String.format(Locale.US,
+                    "Pull complete: %d ok, %d failed -> Download/%s",
+                    successCount.get(), failureCount.get(), targetFolder)));
+            return;
+        }
+
+        MediaFile mediaFile = files.get(index);
+        String fileName = mediaFile != null && mediaFile.getFileName() != null
+                ? mediaFile.getFileName()
+                : ("media_" + System.currentTimeMillis() + "_" + index);
+        long expectedSize = mediaFile != null ? mediaFile.getFileSize() : -1L;
+
+        final DownloadTarget target;
+        final BufferedOutputStream bos;
+        try {
+            target = createDownloadOutputStream(targetFolder, fileName);
+            if (target == null) {
+                failureCount.incrementAndGet();
+                runOnUiThread(() -> tvLog.setText(String.format(Locale.US, "Create output failed %s (%d/%d)",
+                        fileName, successCount.get() + failureCount.get(), totalFiles)));
+                downloadMediaFilesSequential(files, index + 1, targetFolder, successCount, failureCount);
+                return;
+            }
+            bos = new BufferedOutputStream(target.outputStream);
+        } catch (Exception e) {
+            failureCount.incrementAndGet();
+            Log.e(TAG, "Error creating output for " + fileName, e);
+            runOnUiThread(() -> tvLog.setText(String.format(Locale.US, "Create output failed %s (%d/%d)",
+                    fileName, successCount.get() + failureCount.get(), totalFiles)));
+            downloadMediaFilesSequential(files, index + 1, targetFolder, successCount, failureCount);
+            return;
+        }
+
+        final long[] bytesWritten = {0L};
+        final boolean[] writeError = {false};
+        final String progressPrefix = String.format(Locale.US, "[%d/%d] %s", index + 1, totalFiles, fileName);
+        Log.i(TAG, String.format(Locale.US, "Start download %s expectedSize=%d", progressPrefix, expectedSize));
+
+        mediaFile.pullOriginalMediaFileFromCamera(0L, new MediaFileDownloadListener() {
+            @Override
+            public void onStart() {
+                runOnUiThread(() -> tvLog.setText("Downloading " + progressPrefix));
+            }
+
+            @Override
+            public void onProgress(long total, long current) {
+                int progress = total > 0 ? (int) (100 * current / total) : 0;
+                Log.i(TAG, String.format(Locale.US, "Download progress %s: %d%% (%d/%d)", progressPrefix, progress, current, total));
+            }
+
+            @Override
+            public void onRealtimeDataUpdate(byte[] data, long position) {
+                if (data == null || data.length == 0) {
+                    return;
+                }
+                try {
+                    bos.write(data);
+                    bytesWritten[0] += data.length;
+                } catch (IOException e) {
+                    writeError[0] = true;
+                    Log.e(TAG, "Write error for " + progressPrefix, e);
+                }
+            }
+
+            @Override
+            public void onFinish() {
+                boolean ok = !writeError[0] && bytesWritten[0] > 0;
+                try {
+                    bos.flush();
+                    bos.close();
+                } catch (IOException e) {
+                    ok = false;
+                    Log.e(TAG, "Error closing stream for " + progressPrefix, e);
+                }
+                if (ok) {
+                    successCount.incrementAndGet();
+                    Log.i(TAG, String.format(Locale.US, "Download OK %s bytesWritten=%d expectedSize=%d",
+                            progressPrefix, bytesWritten[0], expectedSize));
+                } else {
+                    failureCount.incrementAndGet();
+                    Log.e(TAG, String.format(Locale.US, "Download INVALID %s bytesWritten=%d expectedSize=%d",
+                            progressPrefix, bytesWritten[0], expectedSize));
+                    deleteDownloadTarget(target);
+                }
+                runOnUiThread(() -> tvLog.setText(String.format(Locale.US,
+                        "Downloaded %d/%d (fail %d) -> %s",
+                        successCount.get(), totalFiles, failureCount.get(), progressPrefix)));
+                downloadMediaFilesSequential(files, index + 1, targetFolder, successCount, failureCount);
+            }
+
+            @Override
+            public void onFailure(IDJIError error) {
+                Log.e(TAG, "Download failed for " + progressPrefix + ": " + error);
+                try {
+                    bos.close();
+                } catch (IOException e) {
+                    Log.e(TAG, "Error closing stream on failure for " + progressPrefix, e);
+                }
+                failureCount.incrementAndGet();
+                deleteDownloadTarget(target);
+                runOnUiThread(() -> tvLog.setText(String.format(Locale.US,
+                        "Download failed %s (%d/%d)", progressPrefix, successCount.get() + failureCount.get(), totalFiles)));
+                downloadMediaFilesSequential(files, index + 1, targetFolder, successCount, failureCount);
+            }
+        });
+    }
+
+    private List<MediaFile> filterMediaFilesByMissionTimestamp(@NonNull List<MediaFile> mediaFileList, long missionStartMs) {
+        if (missionStartMs <= 0L) {
+            return new ArrayList<>(mediaFileList);
+        }
+        List<MediaFile> filtered = new ArrayList<>();
+        for (MediaFile mediaFile : mediaFileList) {
+            if (mediaFile == null) {
+                continue;
+            }
+            long mediaMs = mediaFileDateToEpochMillis(mediaFile);
+            if (mediaMs >= missionStartMs) {
+                filtered.add(mediaFile);
+            }
+        }
+        return filtered;
+    }
+
+    private long mediaFileDateToEpochMillis(@NonNull MediaFile mediaFile) {
+        if (mediaFile.getDate() == null) {
+            return Long.MIN_VALUE;
+        }
+        try {
+            Calendar calendar = Calendar.getInstance();
+            calendar.set(Calendar.YEAR, safeInt(mediaFile.getDate().getYear(), 1970));
+            calendar.set(Calendar.MONTH, Math.max(0, safeInt(mediaFile.getDate().getMonth(), 1) - 1));
+            calendar.set(Calendar.DAY_OF_MONTH, safeInt(mediaFile.getDate().getDay(), 1));
+            calendar.set(Calendar.HOUR_OF_DAY, safeInt(mediaFile.getDate().getHour(), 0));
+            calendar.set(Calendar.MINUTE, safeInt(mediaFile.getDate().getMinute(), 0));
+            calendar.set(Calendar.SECOND, safeInt(mediaFile.getDate().getSecond(), 0));
+            calendar.set(Calendar.MILLISECOND, 0);
+            return calendar.getTimeInMillis();
+        } catch (Exception e) {
+            Log.w(TAG, "Failed to parse media file date for " + mediaFile.getFileName(), e);
+            return Long.MIN_VALUE;
+        }
+    }
+
+    private int safeInt(@Nullable Integer value, int fallback) {
+        return value != null ? value : fallback;
+    }
+
+    @NonNull
+    private String buildMissionDownloadFolderName(long missionStartMs) {
+        Calendar calendar = Calendar.getInstance();
+        calendar.setTimeInMillis(missionStartMs > 0 ? missionStartMs : System.currentTimeMillis());
+        return String.format(Locale.US, "Mini3Pro_%04d%02d%02d_%02d%02d%02d",
+                calendar.get(Calendar.YEAR),
+                calendar.get(Calendar.MONTH) + 1,
+                calendar.get(Calendar.DAY_OF_MONTH),
+                calendar.get(Calendar.HOUR_OF_DAY),
+                calendar.get(Calendar.MINUTE),
+                calendar.get(Calendar.SECOND));
+    }
+
+    @Nullable
+    private DownloadTarget createDownloadOutputStream(@NonNull String folderName, @NonNull String fileName) throws IOException {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            ContentValues values = new ContentValues();
+            values.put(MediaStore.Downloads.DISPLAY_NAME, fileName);
+            values.put(MediaStore.Downloads.MIME_TYPE, "application/octet-stream");
+            values.put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/" + folderName);
+            Uri uri = getContentResolver().insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values);
+            if (uri == null) {
+                return null;
+            }
+            OutputStream outputStream = getContentResolver().openOutputStream(uri);
+            if (outputStream == null) {
+                getContentResolver().delete(uri, null, null);
+                return null;
+            }
+            return new DownloadTarget(uri, outputStream);
+        }
+        File downloadDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
+        File targetDir = new File(downloadDir, folderName);
+        if (!targetDir.exists() && !targetDir.mkdirs()) {
+            return null;
+        }
+        return new DownloadTarget(null, new FileOutputStream(new File(targetDir, fileName), false));
+    }
+
+    private void deleteDownloadTarget(@NonNull DownloadTarget target) {
+        if (target.uri == null) {
+            return;
+        }
+        try {
+            getContentResolver().delete(target.uri, null, null);
+        } catch (Exception e) {
+            Log.w(TAG, "Failed to delete invalid downloaded file uri=" + target.uri, e);
+        }
+    }
+
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
@@ -739,14 +929,13 @@ public class MainActivity extends AppCompatActivity {
             if (data != null) {
                 onActivityResultLoadMission(data.getData());
             }
-        } else if (requestCode == REQUEST_CODE_OPEN_DOCUMENT_TREE && resultCode == RESULT_OK) {
-            if (data != null) {
-                onActivityResultPullMedia(data.getData());
-            }
         }
     }
 
     private void loadMission() {
+        if (droneCommander != null) {
+            droneCommander.applyDefaultRthAltitude();
+        }
         if (!checkGPSCoordinates(droneHomeLocation.getLatitude(), droneHomeLocation.getLongitude())
                 && !checkGPSCoordinates(droneCurrentLocation.getLatitude(), droneCurrentLocation.getLongitude())) {
             tvLog.setText(getString(R.string.home_point_unknown));
@@ -758,6 +947,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void startMission() {
+        missionStartTimestampMs = System.currentTimeMillis();
         if (!isMissionLoaded || missionWaypoints.isEmpty()) {
             tvLog.setText("Load a mission first");
             return;
@@ -856,10 +1046,52 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void stopMissionLoopAndHoldPosition() {
-        vsMissionHandler.removeCallbacks(virtualStickMissionLoop);
+        stopMissionLoop();
         if (droneCommander != null) {
             droneCommander.holdPosition(droneHeading);
         }
+    }
+
+    private void stopMissionLoop() {
+        vsMissionHandler.removeCallbacks(virtualStickMissionLoop);
+    }
+
+    private void triggerMissionRTH() {
+        KeyManager.getInstance().performAction(
+                KeyTools.createKey(FlightControllerKey.KeyStartGoHome),
+                new CommonCallbacks.CompletionCallbackWithParam<EmptyMsg>() {
+                    @Override
+                    public void onSuccess(EmptyMsg emptyMsg) {
+                        tvLog.setText("Mission complete: RTH started");
+                        Log.i(TAG, "RTH start onSuccess");
+                    }
+
+                    @Override
+                    public void onFailure(@NonNull IDJIError idjiError) {
+                        Log.e(TAG, "RTH start (KeyStartGoHome) onFailure: " + idjiError);
+                        KeyManager.getInstance().performAction(
+                                KeyTools.createKey(FlightControllerKey.KeyGoHomeConfirm),
+                                true,
+                                new CommonCallbacks.CompletionCallbackWithParam<EmptyMsg>() {
+                                    @Override
+                                    public void onSuccess(EmptyMsg emptyMsg) {
+                                        tvLog.setText("Mission complete: RTH started");
+                                        Log.i(TAG, "RTH start via confirm onSuccess");
+                                    }
+
+                                    @Override
+                                    public void onFailure(@NonNull IDJIError confirmError) {
+                                        tvLog.setText("Mission complete: RTH failed, holding");
+                                        Log.e(TAG, "RTH start onFailure: " + confirmError);
+                                        if (droneCommander != null) {
+                                            droneCommander.holdPosition(droneHeading);
+                                        }
+                                    }
+                                }
+                        );
+                    }
+                }
+        );
     }
 
     private void setHome() {
@@ -1053,7 +1285,7 @@ public class MainActivity extends AppCompatActivity {
 
             // Update current location marker (only if valid GPS coordinates) with rotation for the drone
             if (checkGPSCoordinates(droneCurrentLocation.getLatitude(), droneCurrentLocation.getLongitude())) {
-                Bitmap currentIconBitmap = BitmapFactory.decodeResource(getResources(), R.drawable.drone);
+                Bitmap currentIconBitmap = BitmapFactory.decodeResource(getResources(), R.drawable.aircraft);
                 if (mapStyle.getSource("current-location-source") != null) {
                     GeoJsonSource source = mapStyle.getSourceAs("current-location-source");
                     if (source != null) {

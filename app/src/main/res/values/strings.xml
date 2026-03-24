@@ -32,8 +32,8 @@
     <string name="resume_mission_button">Resume</string>
 
     <string name="simulator_switch">Simulator</string>
-    <string name="rtk_switch">VS</string>
-    <string name="pull_button">Pull</string>
+    <string name="virtual_stick_switch">VS</string>
+    <string name="force_rth_button">RTH</string>
 
     <string name="map_button">Map</string>
     <string name="camera_button">Camera</string>

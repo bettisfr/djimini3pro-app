@@ -13,6 +13,7 @@ import java.util.Set;
 
 import dji.sdk.keyvalue.value.common.LocationCoordinate2D;
 import dji.sdk.wpmz.value.mission.ActionGimbalRotateParam;
+import dji.sdk.wpmz.value.mission.ActionTakePhotoParam;
 import dji.sdk.wpmz.value.mission.WaylineActionGroup;
 import dji.sdk.wpmz.value.mission.WaylineActionInfo;
 import dji.sdk.wpmz.value.mission.WaylineExecuteWaypoint;
@@ -29,6 +30,8 @@ public class MissionPlanner {
 
         void executeGimbalRotate(@Nullable ActionGimbalRotateParam param);
 
+        void executeTakePhoto(@Nullable ActionTakePhotoParam param);
+
         void onPlannerStatus(@NonNull String status);
 
         void onPlannerLog(@NonNull String line);
@@ -39,7 +42,8 @@ public class MissionPlanner {
     private enum MissionActionType {
         ROTATE_YAW,
         HOVER,
-        GIMBAL_ROTATE
+        GIMBAL_ROTATE,
+        TAKE_PHOTO
     }
 
     private static class MissionActionStep {
@@ -49,6 +53,7 @@ public class MissionPlanner {
         double yawHeadingDeg;
         double hoverSeconds;
         ActionGimbalRotateParam gimbalRotateParam;
+        ActionTakePhotoParam takePhotoParam;
     }
 
     private final Callbacks callbacks;
@@ -251,6 +256,9 @@ public class MissionPlanner {
             case GIMBAL_ROTATE:
                 executeGimbalRotateStep(step, now, droneHeading);
                 break;
+            case TAKE_PHOTO:
+                executeTakePhotoStep(step, now, droneHeading);
+                break;
             default:
                 advanceActionCursor();
                 break;
@@ -299,7 +307,31 @@ public class MissionPlanner {
             callbacks.onPlannerLog(String.format(Locale.US, "GIMBAL_ROTATE dispatched (wait %d ms): %s", waitMs, describeActionByParam(step.gimbalRotateParam)));
         }
         long remainMs = Math.max(0L, currentActionWaitUntilMs - now);
-        callbacks.onPlannerStatus(String.format(Locale.US, "Action %d/%d GIMBAL_ROTATE (left %.1fs)",
+        callbacks.onPlannerStatus(String.format(Locale.US, "Action %d/%d %s (left %.1fs)",
+                currentMissionActionCursor + 1,
+                pendingMissionActions.size(),
+                describeActionByParam(step.gimbalRotateParam),
+                remainMs / 1000.0));
+        if (now >= currentActionWaitUntilMs) {
+            advanceActionCursor();
+        }
+    }
+
+    private void executeTakePhotoStep(@NonNull MissionActionStep step, long now, double droneHeading) {
+        callbacks.sendVirtualStickCommand(0.0, 0.0, droneHeading, 0.0);
+        if (!currentGimbalActionTriggered) {
+            currentGimbalActionTriggered = true;
+            long waitMs = 700L;
+            currentActionWaitUntilMs = now + waitMs;
+            callbacks.executeTakePhoto(step.takePhotoParam);
+            String suffix = "";
+            if (step.takePhotoParam != null && step.takePhotoParam.getFileSuffix() != null) {
+                suffix = step.takePhotoParam.getFileSuffix();
+            }
+            callbacks.onPlannerLog(String.format(Locale.US, "TAKE_PHOTO dispatched suffix=%s", suffix));
+        }
+        long remainMs = Math.max(0L, currentActionWaitUntilMs - now);
+        callbacks.onPlannerStatus(String.format(Locale.US, "Action %d/%d TAKE_PHOTO (left %.1fs)",
                 currentMissionActionCursor + 1, pendingMissionActions.size(), remainMs / 1000.0));
         if (now >= currentActionWaitUntilMs) {
             advanceActionCursor();
@@ -362,6 +394,10 @@ public class MissionPlanner {
                 step.type = MissionActionType.GIMBAL_ROTATE;
                 step.gimbalRotateParam = actionInfo.getGimbalRotateParam();
                 return step;
+            case "TAKE_PHOTO":
+                step.type = MissionActionType.TAKE_PHOTO;
+                step.takePhotoParam = actionInfo.getTakePhotoParam();
+                return step;
             default:
                 return null;
         }
@@ -380,6 +416,8 @@ public class MissionPlanner {
                     return actionType + " time=" + actionInfo.getAircraftHoverParam().getHoverTime();
                 case "GIMBAL_ROTATE":
                     return actionType + " " + describeActionByParam(actionInfo.getGimbalRotateParam());
+                case "TAKE_PHOTO":
+                    return actionType + " suffix=" + (actionInfo.getTakePhotoParam() != null ? actionInfo.getTakePhotoParam().getFileSuffix() : "");
                 default:
                     return actionType;
             }

@@ -17,19 +17,19 @@
         android:textColor="#FFFFFF"
         android:text="@string/simulator_switch" />
 
-    <!-- RTK ON/OFF switch -->
+    <!-- Virtual Stick ON/OFF switch -->
     <com.google.android.material.switchmaterial.SwitchMaterial
-        android:id="@+id/switch_rtk"
+        android:id="@+id/switch_virtual_stick"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:textColor="#FFFFFF"
-        android:text="@string/rtk_switch" />
+        android:text="@string/virtual_stick_switch" />
 
-    <!-- Pull button -->
+    <!-- Force RTH button -->
     <Button
-        android:id="@+id/button_pull_media"
+        android:id="@+id/button_force_rth"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:text="@string/pull_button"
+        android:text="@string/force_rth_button"
         android:layout_gravity="center_vertical|start" />
 </LinearLayout>

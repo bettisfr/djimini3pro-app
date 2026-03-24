@@ -1,13 +1,19 @@
 package it.unipg.gearlab;
 
 import android.util.Log;
+import android.os.Handler;
+import android.os.Looper;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
+import java.lang.reflect.Field;
 import java.util.Locale;
 
 import dji.sdk.keyvalue.key.GimbalKey;
+import dji.sdk.keyvalue.key.CameraKey;
+import dji.sdk.keyvalue.key.DJIActionKeyInfo;
+import dji.sdk.keyvalue.key.FlightControllerKey;
 import dji.sdk.keyvalue.key.KeyTools;
 import dji.sdk.keyvalue.value.common.ComponentIndexType;
 import dji.sdk.keyvalue.value.common.DoubleMinMax;
@@ -21,6 +27,7 @@ import dji.sdk.keyvalue.value.gimbal.GimbalAngleRotation;
 import dji.sdk.keyvalue.value.gimbal.GimbalAngleRotationMode;
 import dji.sdk.keyvalue.value.gimbal.GimbalAttitudeRange;
 import dji.sdk.wpmz.value.mission.ActionGimbalRotateParam;
+import dji.sdk.wpmz.value.mission.ActionTakePhotoParam;
 import dji.v5.common.callback.CommonCallbacks;
 import dji.v5.common.error.IDJIError;
 import dji.v5.manager.KeyManager;
@@ -28,6 +35,10 @@ import dji.v5.manager.aircraft.virtualstick.VirtualStickManager;
 
 public class DroneCommander {
     private static final String TAG = DroneCommander.class.getSimpleName();
+    private static final int DEFAULT_RTH_ALTITUDE_METERS = 30;
+    private static final int RTH_SET_MAX_RETRIES = 5;
+    private static final long RTH_SET_RETRY_DELAY_MS = 1000L;
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
 
     private boolean hasGimbalYawCapabilityInfo = false;
     private boolean gimbalYawAdjustSupported = false;
@@ -173,6 +184,89 @@ public class DroneCommander {
                     @Override
                     public void onFailure(@NonNull IDJIError idjiError) {
                         Log.e(TAG, "GIMBAL_ROTATE onFailure: " + idjiError);
+                    }
+                }
+        );
+    }
+
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    public void executeTakePhoto(@Nullable ActionTakePhotoParam param) {
+        try {
+            Field keyField = CameraKey.class.getField("KeyStartShootPhoto");
+            Object keyInfoObj = keyField.get(null);
+            if (!(keyInfoObj instanceof DJIActionKeyInfo)) {
+                Log.w(TAG, "TAKE_PHOTO not supported: KeyStartShootPhoto is not an action key");
+                return;
+            }
+            DJIActionKeyInfo actionKeyInfo = (DJIActionKeyInfo) keyInfoObj;
+            KeyManager.getInstance().performAction(
+                    KeyTools.createKey(actionKeyInfo, ComponentIndexType.LEFT_OR_MAIN),
+                    new CommonCallbacks.CompletionCallbackWithParam<EmptyMsg>() {
+                        @Override
+                        public void onSuccess(EmptyMsg emptyMsg) {
+                            String suffix = param != null && param.getFileSuffix() != null ? param.getFileSuffix() : "";
+                            Log.i(TAG, "TAKE_PHOTO onSuccess suffix=" + suffix);
+                        }
+
+                        @Override
+                        public void onFailure(@NonNull IDJIError idjiError) {
+                            Log.e(TAG, "TAKE_PHOTO onFailure: " + idjiError);
+                        }
+                    }
+            );
+        } catch (NoSuchFieldException e) {
+            Log.w(TAG, "TAKE_PHOTO not supported in this SDK build (KeyStartShootPhoto missing)");
+        } catch (Exception e) {
+            Log.e(TAG, "TAKE_PHOTO failed", e);
+        }
+    }
+
+    public void applyDefaultRthAltitude() {
+        setGoHomeHeightWithRetry(DEFAULT_RTH_ALTITUDE_METERS, RTH_SET_MAX_RETRIES);
+    }
+
+    public void setGoHomeHeight(int meters) {
+        setGoHomeHeightInternal(meters, null);
+    }
+
+    private void setGoHomeHeightWithRetry(int meters, int retriesLeft) {
+        setGoHomeHeightInternal(meters, new CommonCallbacks.CompletionCallback() {
+            @Override
+            public void onSuccess() {
+                // No-op
+            }
+
+            @Override
+            public void onFailure(@NonNull IDJIError idjiError) {
+                if (retriesLeft <= 0) {
+                    Log.e(TAG, "KeyGoHomeHeight failed after retries: " + idjiError);
+                    return;
+                }
+                Log.w(TAG, "KeyGoHomeHeight retry in " + RTH_SET_RETRY_DELAY_MS + "ms, left=" + retriesLeft + " error=" + idjiError);
+                mainHandler.postDelayed(() -> setGoHomeHeightWithRetry(meters, retriesLeft - 1), RTH_SET_RETRY_DELAY_MS);
+            }
+        });
+    }
+
+    private void setGoHomeHeightInternal(int meters, @Nullable CommonCallbacks.CompletionCallback callback) {
+        KeyManager.getInstance().setValue(
+                KeyTools.createKey(FlightControllerKey.KeyGoHomeHeight),
+                meters,
+                new CommonCallbacks.CompletionCallback() {
+                    @Override
+                    public void onSuccess() {
+                        Log.i(TAG, "KeyGoHomeHeight set to " + meters + "m");
+                        if (callback != null) {
+                            callback.onSuccess();
+                        }
+                    }
+
+                    @Override
+                    public void onFailure(@NonNull IDJIError idjiError) {
+                        Log.e(TAG, "KeyGoHomeHeight set failure: " + idjiError);
+                        if (callback != null) {
+                            callback.onFailure(idjiError);
+                        }
                     }
                 }
         );
