@@ -24,6 +24,8 @@ public class MissionPlanner {
     private static final double YAW_ACTION_REACHED_THRESHOLD_DEG = 3.0;
     private static final long YAW_ACTION_SETTLE_MS = 400L;
     private static final long DEFAULT_GIMBAL_ACTION_DURATION_MS = 1200L;
+    // After photo callbacks, keep a short settle window before next gimbal move.
+    // On Mini 3 Pro this reduces camera-busy/gimbal-contention glitches.
     private static final long POST_PHOTO_SETTLE_MS = 1500L;
 
     public interface TakePhotoCallback {
@@ -71,6 +73,7 @@ public class MissionPlanner {
     private long currentActionReachedAtMs = 0L;
     private long currentActionWaitUntilMs = 0L;
     private boolean currentGimbalActionTriggered = false;
+    // Photo action is callback-driven: we wait for camera completion instead of fixed timers.
     private volatile boolean currentTakePhotoCompleted = false;
     private volatile boolean currentTakePhotoSuccess = false;
     @Nullable
@@ -350,6 +353,8 @@ public class MissionPlanner {
             callbacks.onPlannerLog("TAKE_PHOTO dispatched");
         }
 
+        // Do not advance to next action until camera SDK reports completion.
+        // This is required to keep "gimbal -> hover -> photo" deterministic.
         if (!currentTakePhotoCompleted) {
             callbacks.onPlannerStatus(String.format(Locale.US, "Action %d/%d TAKE_PHOTO waiting callback",
                     currentMissionActionCursor + 1, pendingMissionActions.size()));
@@ -357,6 +362,7 @@ public class MissionPlanner {
         }
 
         if (currentActionWaitUntilMs == 0L) {
+            // Extra delay after callback to avoid immediate gimbal command while camera is still settling.
             currentActionWaitUntilMs = now + POST_PHOTO_SETTLE_MS;
             if (currentTakePhotoSuccess) {
                 callbacks.onPlannerLog("TAKE_PHOTO completed, settling...");
