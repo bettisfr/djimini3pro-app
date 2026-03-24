@@ -44,11 +44,16 @@ public class DroneCommander {
     private boolean gimbalYawAdjustSupported = false;
     @Nullable
     private GimbalAttitudeRange gimbalAttitudeRange = null;
+    private double latestGimbalPitchDeg = Double.NaN;
 
     public interface CommandCallback {
         void onSuccess();
 
         void onFailure(@NonNull IDJIError idjiError);
+    }
+
+    public interface PhotoCallback {
+        void onComplete(boolean success, @Nullable String details);
     }
 
     public void enableVirtualStick(@NonNull CommandCallback callback) {
@@ -190,34 +195,48 @@ public class DroneCommander {
     }
 
     @SuppressWarnings({"unchecked", "rawtypes"})
-    public void executeTakePhoto(@Nullable ActionTakePhotoParam param) {
+    public void executeTakePhoto(@Nullable ActionTakePhotoParam param, @Nullable PhotoCallback callback) {
         try {
             Field keyField = CameraKey.class.getField("KeyStartShootPhoto");
             Object keyInfoObj = keyField.get(null);
             if (!(keyInfoObj instanceof DJIActionKeyInfo)) {
                 Log.w(TAG, "TAKE_PHOTO not supported: KeyStartShootPhoto is not an action key");
+                if (callback != null) {
+                    callback.onComplete(false, "KeyStartShootPhoto not action key");
+                }
                 return;
             }
             DJIActionKeyInfo actionKeyInfo = (DJIActionKeyInfo) keyInfoObj;
             KeyManager.getInstance().performAction(
                     KeyTools.createKey(actionKeyInfo, ComponentIndexType.LEFT_OR_MAIN),
                     new CommonCallbacks.CompletionCallbackWithParam<EmptyMsg>() {
-                        @Override
-                        public void onSuccess(EmptyMsg emptyMsg) {
-                            String suffix = param != null && param.getFileSuffix() != null ? param.getFileSuffix() : "";
-                            Log.i(TAG, "TAKE_PHOTO onSuccess suffix=" + suffix);
+                    @Override
+                    public void onSuccess(EmptyMsg emptyMsg) {
+                        Log.i(TAG, "TAKE_PHOTO onSuccess");
+                        if (callback != null) {
+                            callback.onComplete(true, null);
                         }
+                    }
 
                         @Override
                         public void onFailure(@NonNull IDJIError idjiError) {
                             Log.e(TAG, "TAKE_PHOTO onFailure: " + idjiError);
+                            if (callback != null) {
+                                callback.onComplete(false, idjiError.toString());
+                            }
                         }
                     }
             );
         } catch (NoSuchFieldException e) {
             Log.w(TAG, "TAKE_PHOTO not supported in this SDK build (KeyStartShootPhoto missing)");
+            if (callback != null) {
+                callback.onComplete(false, "KeyStartShootPhoto missing");
+            }
         } catch (Exception e) {
             Log.e(TAG, "TAKE_PHOTO failed", e);
+            if (callback != null) {
+                callback.onComplete(false, e.getMessage());
+            }
         }
     }
 
@@ -275,6 +294,10 @@ public class DroneCommander {
     public void updateGimbalYawAdjustCapability(boolean isSupported) {
         hasGimbalYawCapabilityInfo = true;
         gimbalYawAdjustSupported = isSupported;
+    }
+
+    public void updateCurrentGimbalPitch(double pitchDeg) {
+        latestGimbalPitchDeg = pitchDeg;
     }
 
     public void updateGimbalAttitudeRange(@Nullable GimbalAttitudeRange range) {

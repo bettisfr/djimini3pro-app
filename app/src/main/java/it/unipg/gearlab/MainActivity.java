@@ -73,11 +73,15 @@ import dji.sdk.keyvalue.value.common.DoubleMinMax;
 import dji.sdk.keyvalue.value.gimbal.GimbalAngleRotation;
 import dji.sdk.keyvalue.value.gimbal.GimbalAngleRotationMode;
 import dji.sdk.keyvalue.value.gimbal.GimbalAttitudeRange;
+import dji.sdk.wpmz.value.mission.ActionAircraftHoverParam;
 import dji.sdk.wpmz.value.mission.ActionGimbalRotateParam;
 import dji.sdk.wpmz.value.mission.ActionTakePhotoParam;
 import dji.sdk.wpmz.value.mission.WaylineActionGroup;
 import dji.sdk.wpmz.value.mission.WaylineActionInfo;
+import dji.sdk.wpmz.value.mission.WaylineActionType;
 import dji.sdk.wpmz.value.mission.WaylineExecuteWaypoint;
+import dji.sdk.wpmz.value.mission.WaylineGimbalActuatorRotateMode;
+import dji.sdk.wpmz.value.mission.WaylineLocationCoordinate2D;
 import dji.v5.common.callback.CommonCallbacks;
 import dji.v5.common.error.IDJIError;
 import dji.v5.common.register.DJISDKInitEvent;
@@ -104,6 +108,10 @@ public class MainActivity extends AppCompatActivity {
     private static final double EARTH_RADIUS_METERS = 6378137.0;
     private static final long VS_MISSION_TICK_MS = 200L;
     private static final int PICK_KMZ_FILE_REQUEST = 1234;
+    private static final double MANUAL_WP_LAT = 43.06229630922861;
+    private static final double MANUAL_WP_LON = 12.549784090599045;
+    private static final double MANUAL_WP_HEIGHT = 10.0;
+    private static final double[] MANUAL_PITCH_SWEEP_DEG = new double[]{-80, -70, -60, -50, -40, -30, -20, -10, 0};
     private final DecimalFormat decimalFormat = new DecimalFormat("#.##");
     private final DecimalFormat integerFormat = new DecimalFormat("#");
     private final LocationCoordinate2D droneHomeLocation = new LocationCoordinate2D(0., 0.);
@@ -115,6 +123,7 @@ public class MainActivity extends AppCompatActivity {
     private TextView tvBatteryPercentage;
     private TextView tvSimulator;
     private TextView tvDroneYaw;
+    private TextView tvGimbalPitch;
     private TextView tvDroneAltitude;
     private TextView tvDroneSpeed;
     //    private TextView tvGimbalPitchYaw;
@@ -207,9 +216,11 @@ public class MainActivity extends AppCompatActivity {
             }
 
             @Override
-            public void executeTakePhoto(@Nullable ActionTakePhotoParam param) {
+            public void executeTakePhoto(@Nullable ActionTakePhotoParam param, @NonNull MissionPlanner.TakePhotoCallback callback) {
                 if (droneCommander != null) {
-                    droneCommander.executeTakePhoto(param);
+                    droneCommander.executeTakePhoto(param, callback::onComplete);
+                } else {
+                    callback.onComplete(false, "droneCommander null");
                 }
             }
 
@@ -327,6 +338,8 @@ public class MainActivity extends AppCompatActivity {
         tvBatteryPercentage = findViewById(R.id.textview_battery);
         tvSimulator = findViewById(R.id.textview_is_simulator_on);
         tvDroneYaw = findViewById(R.id.textview_drone_yaw);
+        tvGimbalPitch = findViewById(R.id.textview_gimbal_pitch);
+        tvGimbalPitch.setText(String.format(Locale.US, "%.1f", 0.0));
         tvDroneAltitude = findViewById(R.id.textview_drone_altitude);
         tvDroneSpeed = findViewById(R.id.textview_drone_speed);
 //        tvGimbalPitchYaw = findViewById(R.id.textview_gimbal_pitch_yaw);
@@ -946,6 +959,80 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
+    private void loadManualPitchMission() {
+        currentMissionPath = "manual://pitch_sweep";
+        missionWaypoints.clear();
+        missionActionGroups.clear();
+
+        WaylineExecuteWaypoint waypoint = new WaylineExecuteWaypoint();
+        waypoint.setWaypointIndex(0);
+        waypoint.setLocation(new WaylineLocationCoordinate2D(MANUAL_WP_LAT, MANUAL_WP_LON));
+        waypoint.setExecuteHeight(MANUAL_WP_HEIGHT);
+        missionWaypoints.add(waypoint);
+
+        WaylineActionGroup actionGroup = new WaylineActionGroup();
+        actionGroup.setGroupId(0);
+        actionGroup.setStartIndex(0);
+        actionGroup.setEndIndex(0);
+
+        List<WaylineActionInfo> actions = new ArrayList<>();
+        int actionId = 0;
+        for (int i = 0; i < MANUAL_PITCH_SWEEP_DEG.length; i++) {
+            double pitchDeg = MANUAL_PITCH_SWEEP_DEG[i];
+
+            ActionGimbalRotateParam rotateParam = new ActionGimbalRotateParam();
+            rotateParam.setPayloadPositionIndex(0);
+            rotateParam.setRotateMode(WaylineGimbalActuatorRotateMode.ABSOLUTE_ANGLE);
+            rotateParam.setEnablePitch(true);
+            rotateParam.setPitch(pitchDeg);
+            rotateParam.setEnableRoll(false);
+            rotateParam.setRoll(0.0);
+            rotateParam.setEnableYaw(false);
+            rotateParam.setYaw(0.0);
+            rotateParam.setEnableRotateTime(true);
+            rotateParam.setRotateTime(1.0);
+
+            WaylineActionInfo rotateAction = new WaylineActionInfo();
+            rotateAction.setActionId(actionId++);
+            rotateAction.setActionType(WaylineActionType.GIMBAL_ROTATE);
+            rotateAction.setGimbalRotateParam(rotateParam);
+            actions.add(rotateAction);
+
+            ActionAircraftHoverParam hoverParam = new ActionAircraftHoverParam();
+            hoverParam.setHoverTime(2.0);
+            WaylineActionInfo hoverAction = new WaylineActionInfo();
+            hoverAction.setActionId(actionId++);
+            hoverAction.setActionType(WaylineActionType.HOVER);
+            hoverAction.setAircraftHoverParam(hoverParam);
+            actions.add(hoverAction);
+
+            ActionTakePhotoParam takePhotoParam = new ActionTakePhotoParam();
+            takePhotoParam.setPayloadPositionIndex(0);
+            WaylineActionInfo takePhotoAction = new WaylineActionInfo();
+            takePhotoAction.setActionId(actionId++);
+            takePhotoAction.setActionType(WaylineActionType.TAKE_PHOTO);
+            takePhotoAction.setTakePhotoParam(takePhotoParam);
+            actions.add(takePhotoAction);
+        }
+        actionGroup.setActions(actions);
+        missionActionGroups.add(actionGroup);
+
+        if (missionPlanner != null) {
+            missionPlanner.setMissionData(missionWaypoints, missionActionGroups);
+            missionPlanner.resetExecutionState();
+        }
+
+        setMissionOnMap();
+        logParsedWaypointsAndActions();
+
+        isMissionLoaded = true;
+        btnStartStopMission.setEnabled(true);
+        btnStartStopMission.setText(getString(R.string.start_mission_button));
+        btnPauseResumeMission.setEnabled(false);
+        btnPauseResumeMission.setText(getString(R.string.pause_mission_button));
+        tvLog.setText("Manual mission loaded: 1 WP, pitch sweep -80..0 (hover 2s)");
+    }
+
     private void startMission() {
         missionStartTimestampMs = System.currentTimeMillis();
         if (!isMissionLoaded || missionWaypoints.isEmpty()) {
@@ -1442,6 +1529,15 @@ public class MainActivity extends AppCompatActivity {
                         + " roll=" + String.valueOf(range.getRoll())
                         + " yaw=" + String.valueOf(range.getYaw()));
             }
+
+            @Override
+            public void onGimbalAttitudeChanged(double pitchDeg, double rollDeg, double yawDeg) {
+                if (droneCommander != null) {
+                    droneCommander.updateCurrentGimbalPitch(pitchDeg);
+                }
+                runOnUiThread(() -> tvGimbalPitch.setText(String.format(Locale.US, "%.1f", pitchDeg)));
+            }
+
         });
     }
 }

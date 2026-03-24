@@ -20,6 +20,7 @@
     <string name="drone_altitude_label">Alt:</string>
     <string name="drone_speed_label">Speed:</string>
     <string name="drone_yaw_label">Yaw:</string>
+    <string name="gimbal_pitch_label">GimbPitch:</string>
     <string name="gimbal_label">Gimb:</string>
     <string name="log_label">Log:</string>
     <string name="rtk_label">VS:</string>

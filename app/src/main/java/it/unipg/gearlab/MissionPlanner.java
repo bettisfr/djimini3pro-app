@@ -24,13 +24,18 @@ public class MissionPlanner {
     private static final double YAW_ACTION_REACHED_THRESHOLD_DEG = 3.0;
     private static final long YAW_ACTION_SETTLE_MS = 400L;
     private static final long DEFAULT_GIMBAL_ACTION_DURATION_MS = 1200L;
+    private static final long POST_PHOTO_SETTLE_MS = 1500L;
+
+    public interface TakePhotoCallback {
+        void onComplete(boolean success, @Nullable String details);
+    }
 
     public interface Callbacks {
         void sendVirtualStickCommand(double pitch, double roll, double yawAngleDeg, double verticalVelocity);
 
         void executeGimbalRotate(@Nullable ActionGimbalRotateParam param);
 
-        void executeTakePhoto(@Nullable ActionTakePhotoParam param);
+        void executeTakePhoto(@Nullable ActionTakePhotoParam param, @NonNull TakePhotoCallback callback);
 
         void onPlannerStatus(@NonNull String status);
 
@@ -66,6 +71,10 @@ public class MissionPlanner {
     private long currentActionReachedAtMs = 0L;
     private long currentActionWaitUntilMs = 0L;
     private boolean currentGimbalActionTriggered = false;
+    private volatile boolean currentTakePhotoCompleted = false;
+    private volatile boolean currentTakePhotoSuccess = false;
+    @Nullable
+    private volatile String currentTakePhotoDetails = null;
     private boolean isMissionStarted = false;
     private boolean isMissionPaused = false;
     private boolean isExecutingWaypointActions = false;
@@ -93,6 +102,9 @@ public class MissionPlanner {
         currentActionReachedAtMs = 0L;
         currentActionWaitUntilMs = 0L;
         currentGimbalActionTriggered = false;
+        currentTakePhotoCompleted = false;
+        currentTakePhotoSuccess = false;
+        currentTakePhotoDetails = null;
     }
 
     public void startFromWaypoint(int startCursor) {
@@ -105,6 +117,9 @@ public class MissionPlanner {
         currentActionReachedAtMs = 0L;
         currentActionWaitUntilMs = 0L;
         currentGimbalActionTriggered = false;
+        currentTakePhotoCompleted = false;
+        currentTakePhotoSuccess = false;
+        currentTakePhotoDetails = null;
         isExecutingWaypointActions = false;
         currentWaypointCursor = clampInt(startCursor, 0, missionWaypoints.size() - 1);
         isMissionStarted = true;
@@ -240,6 +255,9 @@ public class MissionPlanner {
             currentActionReachedAtMs = 0L;
             currentActionWaitUntilMs = 0L;
             currentGimbalActionTriggered = false;
+            currentTakePhotoCompleted = false;
+            currentTakePhotoSuccess = false;
+            currentTakePhotoDetails = null;
             advanceToNextWaypoint(waypointIndex, droneHeading);
             return;
         }
@@ -321,17 +339,33 @@ public class MissionPlanner {
         callbacks.sendVirtualStickCommand(0.0, 0.0, droneHeading, 0.0);
         if (!currentGimbalActionTriggered) {
             currentGimbalActionTriggered = true;
-            long waitMs = 700L;
-            currentActionWaitUntilMs = now + waitMs;
-            callbacks.executeTakePhoto(step.takePhotoParam);
-            String suffix = "";
-            if (step.takePhotoParam != null && step.takePhotoParam.getFileSuffix() != null) {
-                suffix = step.takePhotoParam.getFileSuffix();
+            currentTakePhotoCompleted = false;
+            currentTakePhotoSuccess = false;
+            currentTakePhotoDetails = null;
+            callbacks.executeTakePhoto(null, (success, details) -> {
+                currentTakePhotoSuccess = success;
+                currentTakePhotoDetails = details;
+                currentTakePhotoCompleted = true;
+            });
+            callbacks.onPlannerLog("TAKE_PHOTO dispatched");
+        }
+
+        if (!currentTakePhotoCompleted) {
+            callbacks.onPlannerStatus(String.format(Locale.US, "Action %d/%d TAKE_PHOTO waiting callback",
+                    currentMissionActionCursor + 1, pendingMissionActions.size()));
+            return;
+        }
+
+        if (currentActionWaitUntilMs == 0L) {
+            currentActionWaitUntilMs = now + POST_PHOTO_SETTLE_MS;
+            if (currentTakePhotoSuccess) {
+                callbacks.onPlannerLog("TAKE_PHOTO completed, settling...");
+            } else {
+                callbacks.onPlannerLog("TAKE_PHOTO failed, settling... " + String.valueOf(currentTakePhotoDetails));
             }
-            callbacks.onPlannerLog(String.format(Locale.US, "TAKE_PHOTO dispatched suffix=%s", suffix));
         }
         long remainMs = Math.max(0L, currentActionWaitUntilMs - now);
-        callbacks.onPlannerStatus(String.format(Locale.US, "Action %d/%d TAKE_PHOTO (left %.1fs)",
+        callbacks.onPlannerStatus(String.format(Locale.US, "Action %d/%d TAKE_PHOTO settle (left %.1fs)",
                 currentMissionActionCursor + 1, pendingMissionActions.size(), remainMs / 1000.0));
         if (now >= currentActionWaitUntilMs) {
             advanceActionCursor();
@@ -351,6 +385,9 @@ public class MissionPlanner {
         currentActionReachedAtMs = 0L;
         currentActionWaitUntilMs = 0L;
         currentGimbalActionTriggered = false;
+        currentTakePhotoCompleted = false;
+        currentTakePhotoSuccess = false;
+        currentTakePhotoDetails = null;
     }
 
     private void advanceToNextWaypoint(int waypointIndex, double droneHeading) {

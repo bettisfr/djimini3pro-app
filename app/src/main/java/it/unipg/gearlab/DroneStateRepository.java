@@ -28,6 +28,8 @@ public class DroneStateRepository {
         void onGimbalYawAdjustSupported(boolean isSupported);
 
         void onGimbalAttitudeRangeChanged(@NonNull GimbalAttitudeRange range);
+
+        void onGimbalAttitudeChanged(double pitchDeg, double rollDeg, double yawDeg);
     }
 
     public void start(@NonNull Object owner, @NonNull Callbacks callbacks) {
@@ -39,6 +41,8 @@ public class DroneStateRepository {
         listenAircraftVelocity(owner, callbacks);
         listenGimbalYawCapability(owner, callbacks);
         listenGimbalAttitudeRange(owner, callbacks);
+        listenGimbalAttitude(owner, callbacks);
+        fetchInitialGimbalAttitude(callbacks);
     }
 
     private void listenConnection(@NonNull Object owner, @NonNull Callbacks callbacks) {
@@ -138,5 +142,49 @@ public class DroneStateRepository {
                     }
                 }
         );
+    }
+
+    private void listenGimbalAttitude(@NonNull Object owner, @NonNull Callbacks callbacks) {
+        KeyManager.getInstance().listen(
+                KeyTools.createKey(GimbalKey.KeyGimbalAttitude, ComponentIndexType.LEFT_OR_MAIN),
+                owner,
+                (attitude, t1) -> {
+                    if (attitude != null) {
+                        callbacks.onGimbalAttitudeChanged(
+                                attitude.getPitch(),
+                                attitude.getRoll(),
+                                attitude.getYaw()
+                        );
+                    }
+                }
+        );
+    }
+
+    private void fetchInitialGimbalAttitude(@NonNull Callbacks callbacks) {
+        Object attitude = KeyManager.getInstance().getValue(
+                KeyTools.createKey(GimbalKey.KeyGimbalAttitude, ComponentIndexType.LEFT_OR_MAIN)
+        );
+        if (attitude == null) {
+            return;
+        }
+        Double pitch = readAttitudeComponent(attitude, "getPitch");
+        Double roll = readAttitudeComponent(attitude, "getRoll");
+        Double yaw = readAttitudeComponent(attitude, "getYaw");
+        if (pitch != null && roll != null && yaw != null) {
+            callbacks.onGimbalAttitudeChanged(pitch, roll, yaw);
+        }
+    }
+
+    @Nullable
+    private Double readAttitudeComponent(@NonNull Object attitude, @NonNull String getterName) {
+        try {
+            Object value = attitude.getClass().getMethod(getterName).invoke(attitude);
+            if (value instanceof Number) {
+                return ((Number) value).doubleValue();
+            }
+        } catch (Exception ignored) {
+            // no-op: this is just a best-effort initial snapshot
+        }
+        return null;
     }
 }
