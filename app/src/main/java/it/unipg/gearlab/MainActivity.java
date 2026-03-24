@@ -139,6 +139,9 @@ public class MainActivity extends AppCompatActivity {
     private boolean isVirtualStickEnabled = false;
     private boolean isSimulatorEnabled = false;
     private boolean mapFallbackApplied = false;
+    private boolean hasEffectiveHome = false;
+    private boolean isEffectiveHomeFromSimulation = false;
+    private boolean isSetHomeInProgress = false;
     private double droneHeading;
     private double droneAltitude;
     private String currentMissionPath;
@@ -180,8 +183,6 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-
-        setSimulationHome();
 
         MapLibre.getInstance(this);
 
@@ -320,10 +321,38 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void setSimulationHome() {
-        if (BuildConfig.SIMULATION == 1) {
-            droneHomeLocation.setLatitude(BuildConfig.SIMULATION_LATITUDE);
-            droneHomeLocation.setLongitude(BuildConfig.SIMULATION_LONGITUDE);
+        if (BuildConfig.SIMULATION != 1 || hasEffectiveHome) {
+            return;
         }
+        setEffectiveHome(
+                BuildConfig.SIMULATION_LATITUDE,
+                BuildConfig.SIMULATION_LONGITUDE,
+                true,
+                "simulator fallback"
+        );
+    }
+
+    private void setEffectiveHome(double latitude, double longitude, boolean fromSimulation, @NonNull String source) {
+        if (!checkGPSCoordinates(latitude, longitude)) {
+            Log.i(TAG, "Ignoring invalid effective home from " + source + ": " + latitude + ", " + longitude);
+            return;
+        }
+        droneHomeLocation.setLatitude(latitude);
+        droneHomeLocation.setLongitude(longitude);
+        hasEffectiveHome = true;
+        isEffectiveHomeFromSimulation = fromSimulation;
+        Log.i(TAG, "Effective home set from " + source + ": " + latitude + ", " + longitude);
+    }
+
+    private void clearSimulationFallbackHomeIfAny() {
+        if (!isEffectiveHomeFromSimulation) {
+            return;
+        }
+        droneHomeLocation.setLatitude(0.0);
+        droneHomeLocation.setLongitude(0.0);
+        hasEffectiveHome = false;
+        isEffectiveHomeFromSimulation = false;
+        Log.i(TAG, "Cleared simulator fallback home");
     }
 
     public void initUI(@Nullable Bundle savedInstanceState) {
@@ -1182,6 +1211,10 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void setHome() {
+        if (isSetHomeInProgress) {
+            return;
+        }
+        isSetHomeInProgress = true;
         KeyManager.getInstance().getValue(KeyTools.createKey(FlightControllerKey.KeyGPSSignalLevel), new CommonCallbacks.CompletionCallbackWithParam<>() {
             @Override
             public void onSuccess(GPSSignalLevel gpsSignalLevel) {
@@ -1193,19 +1226,23 @@ public class MainActivity extends AppCompatActivity {
                         public void onSuccess() {
                             Log.i(TAG, "KeyHomeLocation - onSuccess");
                             tvHome.setText(getString(R.string.true_output));
+                            isSetHomeInProgress = false;
                         }
 
                         @Override
                         public void onFailure(@NonNull IDJIError idjiError) {
                             Log.i(TAG, "KeyHomeLocation - onFailure: " + idjiError);
+                            isSetHomeInProgress = false;
                         }
                     });
+                } else {
+                    isSetHomeInProgress = false;
                 }
             }
 
             @Override
             public void onFailure(@NonNull IDJIError idjiError) {
-
+                isSetHomeInProgress = false;
             }
         });
     }
@@ -1253,6 +1290,13 @@ public class MainActivity extends AppCompatActivity {
 
     private void startSimulator() {
 //        disableVirtualStick();
+        if (!checkGPSCoordinates(droneHomeLocation.getLatitude(), droneHomeLocation.getLongitude())) {
+            setSimulationHome();
+        }
+        if (!checkGPSCoordinates(droneHomeLocation.getLatitude(), droneHomeLocation.getLongitude())) {
+            tvLog.setText("Cannot start simulator: home unknown");
+            return;
+        }
 
         SimulatorManager.getInstance().enableSimulator(InitializationSettings.createInstance(droneHomeLocation, 20), new CommonCallbacks.CompletionCallback() {
             @Override
@@ -1289,6 +1333,7 @@ public class MainActivity extends AppCompatActivity {
             public void onSuccess() {
                 Log.i(TAG, "disableSimulator - onSuccess");
                 isSimulatorEnabled = false;
+                clearSimulationFallbackHomeIfAny();
 
                 tvSimulator.setText(getString(R.string.false_output));
                 tvHome.setTextColor(Color.WHITE);
@@ -1480,8 +1525,10 @@ public class MainActivity extends AppCompatActivity {
                     Log.i(TAG, "Ignoring invalid home location: " + latitude + ", " + longitude);
                     return;
                 }
-                droneHomeLocation.setLatitude(latitude);
-                droneHomeLocation.setLongitude(longitude);
+                if (!hasEffectiveHome || isEffectiveHomeFromSimulation) {
+                    setEffectiveHome(latitude, longitude, false, "first GPS home fix");
+                }
+                isSetHomeInProgress = false;
                 runOnUiThread(() -> {
                     tvLog.setText(getString(R.string.home_point_updated, latitude, longitude));
                     updateDroneHomeAndCurrentLocation();
@@ -1496,7 +1543,10 @@ public class MainActivity extends AppCompatActivity {
                     droneCurrentLocation.setLongitude(longitude);
                 }
                 droneAltitude = altitude;
-                if (droneCurrentLocation.getLatitude() != 0 && droneHomeLocation.getLatitude() == 0) {
+                if (!isSimulatorEnabled
+                        && checkGPSCoordinates(droneCurrentLocation.getLatitude(), droneCurrentLocation.getLongitude())
+                        && !hasEffectiveHome
+                        && !isSetHomeInProgress) {
                     setHome();
                 }
                 runOnUiThread(() -> {
